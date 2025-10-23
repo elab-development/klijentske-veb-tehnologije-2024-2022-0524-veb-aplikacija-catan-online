@@ -35,7 +35,6 @@ export default function CatanBoard({
   onNodeClick,
   onTileClick,
 }: Props) {
-  // Tile polygons
   const tiles = useMemo(() => {
     return view.tiles.map((t) => {
       const axial = axialByTileId[t.id];
@@ -54,7 +53,6 @@ export default function CatanBoard({
     });
   }, [view.tiles, size]);
 
-  // Node positions (anchor tile + corner)
   const nodePos = useMemo(() => {
     const dict: Record<NodeId, { x: number; y: number }> = {};
     for (const [nodeId, anchor] of Object.entries(view.nodeAnchors)) {
@@ -66,7 +64,6 @@ export default function CatanBoard({
     return dict;
   }, [view.nodeAnchors, size]);
 
-  // Board bounds
   const bounds = useMemo(() => {
     const xs = tiles.flatMap((t) => t.corners.map((c) => c.x));
     const ys = tiles.flatMap((t) => t.corners.map((c) => c.y));
@@ -109,7 +106,6 @@ export default function CatanBoard({
                 onClick={() => onTileClick?.(t.id)}
                 style={{ cursor: onTileClick ? 'pointer' : 'default' }}
               />
-              {/* number token */}
               {t.numberToken !== null && (
                 <g transform={`translate(${t.center.x}, ${t.center.y})`}>
                   <circle r={size * 0.35} fill='rgba(255,255,255,0.9)' />
@@ -124,7 +120,6 @@ export default function CatanBoard({
                   </text>
                 </g>
               )}
-              {/* robber ring */}
               {isRobber && (
                 <g transform={`translate(${t.center.x}, ${t.center.y})`}>
                   <circle

@@ -4,13 +4,11 @@ import CatanBoard from '../game/ui/CatanBoard';
 import type { NodeId, TileId } from '../game/catan-core-types';
 
 export default function Game() {
-  // read slices separately to avoid unnecessary rerenders
   const view = useGameStore((s) => s.view);
   const started = useGameStore((s) => s.started);
   const lastRoll = useGameStore((s) => s.lastRoll);
   const messages = useGameStore((s) => s.messages);
 
-  // actions
   const init = useGameStore((s) => s.init);
   const reset = useGameStore((s) => s.reset);
   const addPlayer = useGameStore((s) => s.addPlayer);
@@ -19,17 +17,18 @@ export default function Game() {
   const nextPlayer = useGameStore((s) => s.nextPlayer);
   const moveRobber = useGameStore((s) => s.moveRobber);
   const buildSettlementAt = useGameStore((s) => s.buildSettlementAt);
-  const upgradeCity = useGameStore((s) => s.upgradeCity);
   const placeInitialSettlement = useGameStore((s) => s.placeInitialSettlement);
   const getAvailableSettlementSpots = useGameStore(
     (s) => s.getAvailableSettlementSpots
+  );
+  const getPlayerResourcesFn = useRef(
+    useGameStore.getState().getPlayerResources
   );
 
   const [name, setName] = useState('');
   const [selectedNode, setSelectedNode] = useState<NodeId | null>(null);
   const [availableSpots, setAvailableSpots] = useState<NodeId[]>([]);
 
-  // init once (handles StrictMode dev double-invoke)
   const didInit = useRef(false);
   useEffect(() => {
     if (didInit.current) return;
@@ -37,7 +36,6 @@ export default function Game() {
     init();
   }, [init]);
 
-  // recompute legal nodes when relevant parts of view change
   useEffect(() => {
     if (started && view) setAvailableSpots(getAvailableSettlementSpots());
     else setAvailableSpots([]);
@@ -148,7 +146,7 @@ export default function Game() {
             />
             <InfoCard
               label='Phase'
-              value={view.phase
+              value={phase
                 .replace('awaiting', '▶ ')
                 .replace('setupPlacement', 'Setup Placement')}
             />
@@ -158,7 +156,7 @@ export default function Game() {
             />
           </div>
 
-          {/* SVG Board */}
+          {/* Board */}
           <div className='mb-6'>
             <CatanBoard
               view={view}
@@ -207,6 +205,23 @@ export default function Game() {
             >
               Next Player
             </button>
+          </div>
+
+          {/* Players + resources (BACK) */}
+          <div className='mb-6'>
+            <h2 className='trajanpro-bold mb-2 text-xl'>Players</h2>
+            <div className='grid grid-cols-1 gap-3 md:grid-cols-2'>
+              {view.players.map((p) => (
+                <PlayerCard
+                  key={p.id}
+                  playerId={p.id}
+                  name={p.name}
+                  victoryPoints={p.victoryPoints}
+                  viewVersion={view.turn}
+                  getRes={getPlayerResourcesFn}
+                />
+              ))}
+            </div>
           </div>
 
           {/* Bank */}
@@ -258,6 +273,46 @@ function KeyValueRow({ label, value }: { label: string; value: number }) {
     <div className='flex items-center justify-between border-b border-white/10 py-1 text-white/80'>
       <span>{label}</span>
       <span className='trajanpro-bold'>{value}</span>
+    </div>
+  );
+}
+
+function PlayerCard({
+  playerId,
+  name,
+  victoryPoints,
+  viewVersion,
+  getRes,
+}: {
+  playerId: string;
+  name: string;
+  victoryPoints: number;
+  viewVersion: number;
+  getRes: React.MutableRefObject<(pid: string) => any>;
+}) {
+  const res = useMemo(
+    () => getRes.current(playerId),
+    [playerId, viewVersion, getRes]
+  );
+  const rows = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'] as const;
+
+  return (
+    <div className='rounded-xl bg-white/5 p-4'>
+      <div className='flex items-center justify-between'>
+        <div className='trajanpro-bold text-lg'>{name}</div>
+        <div className='text-white/80'>VP: {victoryPoints}</div>
+      </div>
+      <div className='mt-2 grid grid-cols-2 gap-2'>
+        {rows.map((r) => (
+          <div
+            key={r}
+            className='flex items-center justify-between rounded-md bg-white/5 px-3 py-2'
+          >
+            <span className='text-white/70'>{r}</span>
+            <span className='trajanpro-bold'>{(res as any)[r] ?? 0}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,3 @@
-// Core types shared across engine, store, and UI
-
 export type ResourceType =
   | 'Brick'
   | 'Lumber'
@@ -7,7 +5,6 @@ export type ResourceType =
   | 'Grain'
   | 'Ore'
   | 'Desert';
-
 export const ResourceType = {
   Brick: 'Brick' as ResourceType,
   Lumber: 'Lumber' as ResourceType,
@@ -20,13 +17,13 @@ export const ResourceType = {
 export type ResourceBundle = Partial<Record<ResourceType, number>>;
 
 export type TileId = string;
-export type NodeId = string; // settlement/city spot
-export type EdgeId = string; // (reserved for roads later)
+export type NodeId = string;
+export type EdgeId = string;
 
 export interface Tile {
   id: TileId;
   resource: ResourceType;
-  numberToken: number | null; // null for Desert
+  numberToken: number | null;
 }
 
 export interface PlayerState {
@@ -54,7 +51,6 @@ export interface PublicGameView {
   turn: number;
   phase: TurnPhase;
 
-  // geometry / ownership for UI
   nodeOwnership: Record<NodeId, string | null>;
   nodeAdjacentTiles: Record<NodeId, TileId[]>;
   nodeAnchors: Record<NodeId, { tileId: TileId; cornerIndex: number }>;
