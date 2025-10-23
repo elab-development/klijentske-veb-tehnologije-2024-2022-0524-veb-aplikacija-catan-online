@@ -207,7 +207,7 @@ export default function Game() {
             </button>
           </div>
 
-          {/* Players + resources (BACK) */}
+          {/* Players + resources */}
           <div className='mb-6'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Players</h2>
             <div className='grid grid-cols-1 gap-3 md:grid-cols-2'>
@@ -235,7 +235,7 @@ export default function Game() {
           </div>
 
           {/* Log */}
-          <div className='rounded-xl bg-white/5 p-4'>
+          <div className='rounded-xl bg白/5 p-4 bg-white/5'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Log</h2>
             <ul className='list-disc pl-5 text-white/80'>
               {messages.map((m, i) => (

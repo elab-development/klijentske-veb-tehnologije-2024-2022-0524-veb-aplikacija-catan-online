@@ -5,6 +5,7 @@ export type ResourceType =
   | 'Grain'
   | 'Ore'
   | 'Desert';
+
 export const ResourceType = {
   Brick: 'Brick' as ResourceType,
   Lumber: 'Lumber' as ResourceType,
@@ -18,7 +19,6 @@ export type ResourceBundle = Partial<Record<ResourceType, number>>;
 
 export type TileId = string;
 export type NodeId = string;
-export type EdgeId = string;
 
 export interface Tile {
   id: TileId;
@@ -30,9 +30,7 @@ export interface PlayerState {
   id: string;
   name: string;
   resources: ResourceBundle;
-  roads: Set<EdgeId>;
   settlements: Set<NodeId>;
-  cities: Set<NodeId>;
   victoryPoints: number;
 }
 

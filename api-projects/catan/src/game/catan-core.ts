@@ -4,7 +4,6 @@ import {
   type Tile,
   type TileId,
   type NodeId,
-  type EdgeId,
   type PlayerState,
   type TurnPhase,
   type PublicGameView,
@@ -174,9 +173,7 @@ export class CatanEngine {
       id,
       name,
       resources: EMPTY_BUNDLE(),
-      roads: new Set<EdgeId>(),
       settlements: new Set<NodeId>(),
-      cities: new Set<NodeId>(),
       victoryPoints: 0,
     });
     this.currentPlayerOrder = Array.from(this.players.keys());
@@ -329,8 +326,8 @@ export class CatanEngine {
         if (!ownerId) continue;
         const player = this.players.get(ownerId)!;
 
-        const isCity = player.cities.has(nid);
-        const gain = isCity ? 2 : 1;
+        // Settlements only (no city multiplier)
+        const gain = 1;
 
         if ((this.bank[tile.resource] ?? 0) <= 0) continue;
         const actual = Math.min(gain, this.bank[tile.resource] ?? 0);
@@ -374,7 +371,7 @@ export class CatanEngine {
     }
   }
 
-  // ----- building (paid during actions) -----
+  // ----- building settlements (paid during actions) -----
   buildSettlementAt(playerId: string, nodeId: NodeId): boolean {
     if (this.phase !== 'awaitingActions') throw new Error('Cannot build now.');
     const p = this.players.get(playerId);
@@ -399,28 +396,6 @@ export class CatanEngine {
 
     this.nodeOwnership.set(nodeId, playerId);
     p.settlements.add(nodeId);
-    p.victoryPoints += 1;
-    return true;
-  }
-
-  upgradeToCity(playerId: string, nodeId: NodeId): boolean {
-    if (this.phase !== 'awaitingActions')
-      throw new Error('Cannot upgrade now.');
-    const p = this.players.get(playerId);
-    if (!p) return false;
-    if (!p.settlements.has(nodeId)) return false; // must own settlement here
-
-    const cost: ResourceBundle = {
-      [ResourceType.Grain]: 2,
-      [ResourceType.Ore]: 3,
-    };
-    if (!this.trader.hasResources(p, cost)) return false;
-
-    subBundles(p.resources, cost);
-    addBundles(this.bank, cost);
-
-    p.settlements.delete(nodeId);
-    p.cities.add(nodeId);
     p.victoryPoints += 1;
     return true;
   }

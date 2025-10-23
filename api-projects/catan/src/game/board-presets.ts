@@ -22,7 +22,7 @@ export function axialToPixel(q: number, r: number, size: number) {
   return { x, y };
 }
 export function hexCornerOffset(size: number, cornerIndex: number) {
-  const angle = (Math.PI / 180) * (60 * cornerIndex); // 0°, 60°, ...
+  const angle = (Math.PI / 180) * (60 * cornerIndex);
   return { dx: size * Math.cos(angle), dy: size * Math.sin(angle) };
 }
 
@@ -34,7 +34,6 @@ const generateAxialCenters = (radius = 2): Axial[] => {
     const r2 = Math.min(radius, -q + radius);
     for (let r = r1; r <= r2; r++) out.push({ q, r });
   }
-  // Sort row-wise: r asc, then q asc -> rows 3/4/5/4/3
   out.sort((a, b) => a.r - b.r || a.q - b.q);
   return out;
 };
@@ -60,6 +59,7 @@ const RESOURCE_POOL = [
   ResourceType.Ore,
   ResourceType.Desert,
 ] as const;
+
 const NUMBER_TOKENS: number[] = [
   5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9, 4, 5, 6, 3, 11,
 ];
@@ -95,26 +95,20 @@ function buildNodesFromTiles(
   tiles: Tile[],
   axialById: Record<TileId, Axial>
 ): NodeDef[] {
-  const SIZE = 100; // arbitrary; used only to dedupe/anchor
-  const PREC = 1000; // rounding precision for keys
-
+  const SIZE = 100;
+  const PREC = 1000;
   const cornerKey = (x: number, y: number) =>
     `${Math.round(x * PREC)},${Math.round(y * PREC)}`;
 
-  // cornerKey -> node info
   const cornerToNode = new Map<
     string,
     { id: NodeId; anchorTileId: TileId; cornerIndex: number }
   >();
   let nodeSeq = 1;
 
-  // nodeId -> tiles touching it
   const nodeTiles = new Map<NodeId, Set<TileId>>();
-  // nodeId -> neighbor nodeIds
   const nodeNeighbors = new Map<NodeId, Set<NodeId>>();
 
-  // For each tile, compute its 6 corners in pixel space, dedupe to nodes,
-  // and connect consecutive corners as neighbors (the tile's 6 edges).
   for (const tile of tiles) {
     const axial = axialById[tile.id];
     const center = axialToPixel(axial.q, axial.r, SIZE);
@@ -138,7 +132,6 @@ function buildNodesFromTiles(
       cornerNodes.push(info.id);
     }
 
-    // connect ring neighbors around this tile (edges)
     for (let i = 0; i < 6; i++) {
       const a = cornerNodes[i];
       const b = cornerNodes[(i + 1) % 6];
@@ -147,7 +140,6 @@ function buildNodesFromTiles(
     }
   }
 
-  // Emit NodeDefs sorted by numeric id for stability
   const infos = [...cornerToNode.values()].sort(
     (A, B) => Number(A.id.slice(1)) - Number(B.id.slice(1))
   );
