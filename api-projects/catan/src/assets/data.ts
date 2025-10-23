@@ -69,3 +69,7 @@ export const boards: Board[] = [
     age: 14,
   },
 ];
+
+export const findBoardById = (id: string): Board | undefined => {
+  return boards.find((board) => board.id === id);
+};
