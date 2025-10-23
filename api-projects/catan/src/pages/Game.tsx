@@ -152,7 +152,7 @@ export default function Game() {
             </div>
 
             {/* Kontrole za start/continue/clear/reset */}
-            <div className='flex items-center gap-2'>
+            <div className='flex items-center flex-wrap gap-2'>
               <button
                 disabled={!canStart}
                 onClick={() => startGame(view?.players[0]?.id)}
@@ -166,7 +166,7 @@ export default function Game() {
                 Start game
               </button>
 
-              {hasSaved && (
+              {hasSaved && !view?.players.length && (
                 <>
                   <button
                     onClick={continueSaved}
@@ -251,7 +251,7 @@ export default function Game() {
               disabled={!canRoll}
               className={`rounded-md px-4 py-2 ${
                 canRoll
-                  ? 'bg-[#215B85] hover:opacity-90'
+                  ? 'bg-[#215B85] hover:opacity-90 cursor-pointer'
                   : 'bg-white/10 cursor-not-allowed'
               }`}
               title={
@@ -266,7 +266,7 @@ export default function Game() {
               disabled={!canAct}
               className={`rounded-md px-4 py-2 ${
                 canAct
-                  ? 'border border-white/20 hover:bg-white/10'
+                  ? 'border border-white/20 hover:bg-white/10 cursor-pointer'
                   : 'bg-white/10 cursor-not-allowed'
               }`}
               title={

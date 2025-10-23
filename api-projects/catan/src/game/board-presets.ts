@@ -5,16 +5,19 @@
 // Čvorovi se postavljaju po pixel koordinatama uglova hexa da
 // bismo dobili ispravne susede i pravilo razdaljine.
 // ------------------------------------------------------------
-import { ResourceType, type Tile, type TileId } from './catan-core-types';
+import {
+  ResourceType,
+  type Tile,
+  type TileId,
+  type NodeId,
+} from './catan-core-types';
 
 /**
- * NodeId — identifikator teme (čvora) na kom se gradi naselje.
  * NodeDef — kompletna definicija jednog čvora:
  *  - adjacentTiles: koje pločice dodiruju ovo teme (1..3 kom)
  *  - neighborNodes: čvorovi na koje se ide jednom ivicom — koristi se za pravilo razdaljine
  *  - anchorTileId + cornerIndex: “sidro” za računanje pixel pozicije u SVG-u
  */
-export type NodeId = string;
 export interface NodeDef {
   id: NodeId;
   adjacentTiles: TileId[];

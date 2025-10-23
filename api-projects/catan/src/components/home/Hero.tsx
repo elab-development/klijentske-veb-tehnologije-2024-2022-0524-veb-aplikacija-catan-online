@@ -8,9 +8,9 @@ const Hero = () => {
       <img
         src={CatanHeroImg}
         alt='Catan Hero'
-        className='w-full h-auto object-cover'
+        className='sm:w-full h-screen sm:h-auto object-cover '
       />
-      <div className='bg-[linear-gradient(to_bottom,#08151F,#215B85,#215B85)] w-full flex justify-center items-center flex-col py-10 gap-6'>
+      <div className='sm:px-0 px-4 bg-[linear-gradient(to_bottom,#08151F,#215B85,#215B85)] w-full flex justify-center items-center flex-col py-10 gap-6'>
         <img src={CatanLogoImg} alt='Catan Logo' className='max-w-[380px]' />
         <h2 className='text-white text-2xl text-center'>
           Explore the world of CATAN – where your strategic adventure begins!
