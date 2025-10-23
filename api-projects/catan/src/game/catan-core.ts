@@ -34,7 +34,7 @@ export interface ITradingService {
 
 // ---------- Dice API client implementing IRandomService ----------
 export class DiceApiRandomService implements IRandomService {
-  // Use Vite proxy to avoid CORS in dev
+  // Use Vite proxy to avoid CORS in dev (vite.config.ts has /qrand proxy)
   private endpoint = '/qrand/api/random/dice?n=2';
 
   async rollDice(): Promise<{
@@ -86,6 +86,10 @@ function subBundles(target: ResourceBundle, delta: ResourceBundle) {
     if (key === ResourceType.Desert) continue;
     target[key] = (target[key] ?? 0) - (delta[key] ?? 0);
   }
+}
+function inc(bundle: ResourceBundle, res: ResourceType, by = 1) {
+  if (res === ResourceType.Desert) return;
+  bundle[res] = (bundle[res] ?? 0) + by;
 }
 function bundleCount(bundle: ResourceBundle): number {
   let sum = 0;
@@ -254,20 +258,38 @@ export class CatanEngine {
 
   // ----- gameplay flow -----
   async rollAndDistribute(): Promise<{
+    dice1: number;
+    dice2: number;
     total: number;
     source: 'api' | 'local';
+    gains?: Record<string, ResourceBundle>;
+    discards?: Record<string, ResourceBundle>;
   }> {
     if (this.phase !== 'awaitingRoll') throw new Error('Cannot roll now.');
     const roll = await this.rng.rollDice();
 
     if (roll.total === 7) {
-      this.handleRobberSeven();
+      // collect who discarded what
+      const discards = this.handleRobberSeven();
       this.phase = 'awaitingRobberMove';
+      return {
+        dice1: roll.dice1,
+        dice2: roll.dice2,
+        total: roll.total,
+        source: roll.source,
+        discards: Object.fromEntries(discards.entries()),
+      };
     } else {
-      this.distributeFor(roll.total);
+      const gains = this.distributeFor(roll.total); // per-player resource gains
       this.phase = 'awaitingActions';
+      return {
+        dice1: roll.dice1,
+        dice2: roll.dice2,
+        total: roll.total,
+        source: roll.source,
+        gains: Object.fromEntries(gains.entries()),
+      };
     }
-    return { total: roll.total, source: roll.source };
   }
 
   nextPlayer() {
@@ -278,7 +300,10 @@ export class CatanEngine {
     this.phase = 'awaitingRoll';
   }
 
-  moveRobber(toTile: TileId, stealFromPlayerId?: string) {
+  moveRobber(
+    toTile: TileId,
+    stealFromPlayerId?: string
+  ): { theft?: { from: string; to: string; resource: ResourceType } } | void {
     if (!this.tiles.find((t) => t.id === toTile))
       throw new Error('Unknown tile.');
     const wasAwaitingRobber = this.phase === 'awaitingRobberMove';
@@ -300,6 +325,8 @@ export class CatanEngine {
           const res = victimCards[idx];
           victim.resources[res]! -= 1;
           thief.resources[res] = (thief.resources[res] ?? 0) + 1;
+          if (wasAwaitingRobber) this.phase = 'awaitingActions';
+          return { theft: { from: victim.id, to: thief.id, resource: res } };
         }
       }
     }
@@ -307,7 +334,10 @@ export class CatanEngine {
     if (wasAwaitingRobber) this.phase = 'awaitingActions';
   }
 
-  private distributeFor(numberToken: number) {
+  // ----- internals producing per-player deltas -----
+  private distributeFor(numberToken: number): Map<string, ResourceBundle> {
+    const perPlayer = new Map<string, ResourceBundle>();
+
     const tiles = this.tiles.filter(
       (t) => t.numberToken === numberToken && t.id !== this.robberOn
     );
@@ -319,29 +349,37 @@ export class CatanEngine {
         if (!ownerId) continue;
         const player = this.players.get(ownerId)!;
 
-        // Settlements only (no city multiplier)
-        const gain = 1;
+        const gain = 1; // settlements only (cities removed from your brief)
+        const available = this.bank[tile.resource] ?? 0;
+        if (available <= 0) continue;
 
-        if ((this.bank[tile.resource] ?? 0) <= 0) continue;
-        const actual = Math.min(gain, this.bank[tile.resource] ?? 0);
+        const actual = Math.min(gain, available);
         player.resources[tile.resource] =
           (player.resources[tile.resource] ?? 0) + actual;
         this.bank[tile.resource]! -= actual;
+
+        const bundle = perPlayer.get(ownerId) ?? EMPTY_BUNDLE();
+        inc(bundle, tile.resource, actual);
+        perPlayer.set(ownerId, bundle);
       }
     }
+    return perPlayer;
   }
 
-  private handleRobberSeven() {
+  private handleRobberSeven(): Map<string, ResourceBundle> {
+    const perPlayerLosses = new Map<string, ResourceBundle>();
     for (const p of this.players.values()) {
       const total = bundleCount(p.resources);
       if (total >= 8) {
         const toDiscard = Math.floor(total / 2);
-        this.discardEvenly(p, toDiscard);
+        const lost = this.discardEvenly(p, toDiscard);
+        if (bundleCount(lost) > 0) perPlayerLosses.set(p.id, lost);
       }
     }
+    return perPlayerLosses;
   }
 
-  private discardEvenly(p: PlayerState, toDiscard: number) {
+  private discardEvenly(p: PlayerState, toDiscard: number): ResourceBundle {
     const order: (keyof ResourceBundle)[] = [
       ResourceType.Brick,
       ResourceType.Lumber,
@@ -349,6 +387,7 @@ export class CatanEngine {
       ResourceType.Grain,
       ResourceType.Ore,
     ];
+    const lost = EMPTY_BUNDLE();
     let remaining = toDiscard;
     while (remaining > 0) {
       let did = false;
@@ -356,12 +395,14 @@ export class CatanEngine {
         if ((p.resources[res] ?? 0) > 0 && remaining > 0) {
           p.resources[res]! -= 1;
           this.bank[res]! += 1;
+          inc(lost, res, 1);
           remaining -= 1;
           did = true;
         }
       }
       if (!did) break;
     }
+    return lost;
   }
 
   // ----- building settlements (paid during actions) -----

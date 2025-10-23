@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
 import CatanBoard from '../game/ui/CatanBoard';
-import type { NodeId, TileId } from '../game/catan-core-types';
+import type { NodeId, TileId, ResourceBundle } from '../game/catan-core-types';
 
 export default function Game() {
   const view = useGameStore((s) => s.view);
   const started = useGameStore((s) => s.started);
   const lastRoll = useGameStore((s) => s.lastRoll);
   const messages = useGameStore((s) => s.messages);
+  const lastGains = useGameStore((s) => s.lastGains);
+  const lastLosses = useGameStore((s) => s.lastLosses);
+  const resVersion = useGameStore((s) => s.resVersion);
 
   const init = useGameStore((s) => s.init);
   const reset = useGameStore((s) => s.reset);
@@ -200,7 +203,7 @@ export default function Game() {
             </button>
           </div>
 
-          {/* Players + resources */}
+          {/* Players + resources with deltas */}
           <div className='mb-6'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Players</h2>
             <div className='grid grid-cols-1 gap-3 md:grid-cols-2'>
@@ -210,8 +213,10 @@ export default function Game() {
                   playerId={p.id}
                   name={p.name}
                   victoryPoints={p.victoryPoints}
-                  viewVersion={view.turn}
+                  resVersion={resVersion} // recompute immediately after roll/robber
                   getRes={getPlayerResourcesFn}
+                  gains={lastGains[p.id] ?? {}}
+                  losses={lastLosses[p.id] ?? {}}
                 />
               ))}
             </div>
@@ -274,18 +279,22 @@ function PlayerCard({
   playerId,
   name,
   victoryPoints,
-  viewVersion,
+  resVersion,
   getRes,
+  gains,
+  losses,
 }: {
   playerId: string;
   name: string;
   victoryPoints: number;
-  viewVersion: number;
+  resVersion: number;
   getRes: React.MutableRefObject<(pid: string) => any>;
+  gains: ResourceBundle;
+  losses: ResourceBundle;
 }) {
   const res = useMemo(
     () => getRes.current(playerId),
-    [playerId, viewVersion, getRes]
+    [playerId, resVersion, getRes]
   );
   const rows = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'] as const;
 
@@ -295,16 +304,33 @@ function PlayerCard({
         <div className='trajanpro-bold text-lg'>{name}</div>
         <div className='text-white/80'>VP: {victoryPoints}</div>
       </div>
-      <div className='mt-2 grid grid-cols-2 gap-2'>
-        {rows.map((r) => (
-          <div
-            key={r}
-            className='flex items-center justify-between rounded-md bg-white/5 px-3 py-2'
-          >
-            <span className='text-white/70'>{r}</span>
-            <span className='trajanpro-bold'>{(res as any)[r] ?? 0}</span>
-          </div>
-        ))}
+      <div className='mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2'>
+        {rows.map((r) => {
+          const base = (res as any)[r] ?? 0;
+          const plus = (gains as any)[r] ?? 0;
+          const minus = (losses as any)[r] ?? 0;
+          return (
+            <div
+              key={r}
+              className='flex items-center justify-between rounded-md bg-white/5 px-3 py-2'
+            >
+              <span className='text-white/70'>{r}</span>
+              <span className='trajanpro-bold inline-flex items-center gap-2'>
+                <span>{base}</span>
+                {plus > 0 && (
+                  <span className='text-green-400 text-sm font-normal'>
+                    +{plus}
+                  </span>
+                )}
+                {minus > 0 && (
+                  <span className='text-red-400 text-sm font-normal'>
+                    -{minus}
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

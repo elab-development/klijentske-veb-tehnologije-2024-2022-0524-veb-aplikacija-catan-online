@@ -10,11 +10,13 @@ import type {
   PublicGameView,
   ResourceBundle,
   NodeId,
+  ResourceType,
 } from '../game/catan-core-types';
 import { randomizedStandard19Tiles } from '../game/board-presets';
 import { fetchDrandSeed32 } from '../game/random-seed';
 
 type RollInfo = { total: number; source: 'api' | 'local' };
+type DeltaMap = Record<string, ResourceBundle>; // playerId -> bundle
 
 type GameState = {
   engine: CatanEngine | null;
@@ -22,6 +24,11 @@ type GameState = {
   started: boolean;
   lastRoll: RollInfo | null;
   messages: string[];
+
+  // NEW: per-turn delta overlays and a version to force resource re-render
+  lastGains: DeltaMap;
+  lastLosses: DeltaMap;
+  resVersion: number;
 
   // lifecycle
   init(): void;
@@ -43,12 +50,17 @@ type GameState = {
   getPlayerResources(playerId: string): ResourceBundle;
 };
 
+const emptyDelta = (): DeltaMap => ({});
+
 export const useGameStore = create<GameState>((set, get) => ({
   engine: null,
   view: null,
   started: false,
   lastRoll: null,
   messages: [],
+  lastGains: emptyDelta(),
+  lastLosses: emptyDelta(),
+  resVersion: 0,
 
   // fire-and-forget init: fetch drand seed and build randomized tiles
   init() {
@@ -65,9 +77,11 @@ export const useGameStore = create<GameState>((set, get) => ({
           started: false,
           lastRoll: null,
           messages: [`Game initialized with randomized board (seed=${seed}).`],
+          lastGains: emptyDelta(),
+          lastLosses: emptyDelta(),
+          resVersion: 0,
         });
       } catch {
-        // fallback to deterministic board
         const rng: IRandomService = new DiceApiRandomService();
         const trader: ITradingService = new FourToOneTradingService();
         const engine = new CatanEngine(rng, trader);
@@ -77,6 +91,9 @@ export const useGameStore = create<GameState>((set, get) => ({
           started: false,
           lastRoll: null,
           messages: ['Game initialized (fallback board).'],
+          lastGains: emptyDelta(),
+          lastLosses: emptyDelta(),
+          resVersion: 0,
         });
       }
     })();
@@ -108,6 +125,9 @@ export const useGameStore = create<GameState>((set, get) => ({
         ...get().messages,
         'Setup: each player must place 2 settlements (snake order).',
       ],
+      lastGains: emptyDelta(),
+      lastLosses: emptyDelta(),
+      resVersion: get().resVersion + 1,
     });
   },
 
@@ -130,6 +150,8 @@ export const useGameStore = create<GameState>((set, get) => ({
           ...get().messages,
           `Placed initial settlement on ${nodeId}.`,
         ],
+        // no deltas during setup
+        resVersion: get().resVersion + 1,
       });
     } catch (e: any) {
       set((s) => ({
@@ -143,16 +165,28 @@ export const useGameStore = create<GameState>((set, get) => ({
     const { engine } = get();
     if (!engine) return;
     try {
+      // clear old overlays for this new roll
+      set({ lastGains: emptyDelta(), lastLosses: emptyDelta() });
+
       const res = await engine.rollAndDistribute();
+
+      // convert optional maps coming back
+      const gains = (res as any).gains ?? {};
+      const discards = (res as any).discards ?? {};
+
+      // Build message line(s)
+      const baseMsg =
+        res.total === 7
+          ? `Rolled 7 — discard if 8+ cards, then move the robber.`
+          : `Rolled ${res.total} (${res.source}). Resources distributed.`;
+
       set({
-        lastRoll: res,
+        lastRoll: { total: res.total, source: res.source },
         view: engine.getPublicState(),
-        messages: [
-          ...get().messages,
-          res.total === 7
-            ? `Rolled 7 — discard if 8+ cards, then move the robber.`
-            : `Rolled ${res.total} (${res.source}). Resources distributed.`,
-        ],
+        messages: [...get().messages, baseMsg],
+        lastGains: gains,
+        lastLosses: discards, // when 7, show immediate losses
+        resVersion: get().resVersion + 1, // force PlayerCard to recompute resources now
       });
     } catch (e: any) {
       set((s) => ({
@@ -169,6 +203,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       set({
         view: engine.getPublicState(),
         messages: [...get().messages, 'Next player.'],
+        // keep lastGains/lastLosses visible until next roll; do NOT clear
+        resVersion: get().resVersion + 1,
       });
     } catch (e: any) {
       set((s) => ({
@@ -181,11 +217,44 @@ export const useGameStore = create<GameState>((set, get) => ({
     const { engine } = get();
     if (!engine) return;
     try {
-      engine.moveRobber(tileId, stealFromPlayerId);
-      set({
-        view: engine.getPublicState(),
-        messages: [...get().messages, `Robber moved to ${tileId}.`],
-      });
+      const result = engine.moveRobber(tileId, stealFromPlayerId) as {
+        theft?: { from: string; to: string; resource: ResourceType };
+      } | void;
+
+      const msg = `Robber moved to ${tileId}.`;
+      let updatedGains = { ...get().lastGains };
+      let updatedLosses = { ...get().lastLosses };
+
+      // If a steal occurred, overlay +1 / -1 deltas
+      if (result && (result as any).theft) {
+        const { from, to, resource } = (result as any).theft!;
+        updatedGains[to] = {
+          ...(updatedGains[to] ?? {}),
+          [resource as ResourceType]:
+            (updatedGains[to]?.[resource as ResourceType] ?? 0) + 1,
+        };
+        updatedLosses[from] = {
+          ...(updatedLosses[from] ?? {}),
+          [resource as ResourceType]:
+            (updatedLosses[from]?.[resource as ResourceType] ?? 0) + 1,
+        };
+        set({
+          view: engine.getPublicState(),
+          messages: [
+            ...get().messages,
+            `${msg} Stole 1 ${resource} from victim.`,
+          ],
+          lastGains: updatedGains,
+          lastLosses: updatedLosses,
+          resVersion: get().resVersion + 1,
+        });
+      } else {
+        set({
+          view: engine.getPublicState(),
+          messages: [...get().messages, msg],
+          resVersion: get().resVersion + 1,
+        });
+      }
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot move robber now.'],
@@ -206,6 +275,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             ? `Built settlement on ${nodeId}.`
             : 'Not enough resources / invalid spot.',
         ],
+        resVersion: get().resVersion + 1,
       });
     } catch (e: any) {
       set((s) => ({
