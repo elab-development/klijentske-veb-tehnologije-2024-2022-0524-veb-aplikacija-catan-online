@@ -1,43 +1,84 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
+import type { NodeId } from '../game/catan-core-types';
 
 export default function Game() {
-  const {
-    init,
-    reset,
-    addPlayer,
-    startGame,
-    roll,
-    nextPlayer,
-    moveRobber,
-    buildSettlement,
-    upgradeCity,
-    view,
-    started,
-    lastRoll,
-    messages,
-  } = useGameStore();
+  // Pull ONLY what you need so renders are cheaper and more predictable
+  const view = useGameStore((s) => s.view);
+  const started = useGameStore((s) => s.started);
+  const lastRoll = useGameStore((s) => s.lastRoll);
+  const messages = useGameStore((s) => s.messages);
+
+  // actions (stable references from zustand)
+  const init = useGameStore((s) => s.init);
+  const reset = useGameStore((s) => s.reset);
+  const addPlayer = useGameStore((s) => s.addPlayer);
+  const startGame = useGameStore((s) => s.startGame);
+  const roll = useGameStore((s) => s.roll);
+  const nextPlayer = useGameStore((s) => s.nextPlayer);
+  const moveRobber = useGameStore((s) => s.moveRobber);
+  const buildSettlementAt = useGameStore((s) => s.buildSettlementAt);
+  const upgradeCity = useGameStore((s) => s.upgradeCity);
+  const placeInitialSettlement = useGameStore((s) => s.placeInitialSettlement);
+  const getAvailableSettlementSpots = useGameStore(
+    (s) => s.getAvailableSettlementSpots
+  );
+  const getPlayerResourcesFn = useRef(
+    useGameStore.getState().getPlayerResources
+  );
 
   const [name, setName] = useState('');
+  const [selectedNode, setSelectedNode] = useState<NodeId | null>(null);
+  const [availableSpots, setAvailableSpots] = useState<NodeId[]>([]);
 
+  // INIT — ensure this only runs once (guards StrictMode double-invoke in dev)
+  const didInit = useRef(false);
   useEffect(() => {
+    if (didInit.current) return;
+    didInit.current = true;
     init();
   }, [init]);
 
+  // Recompute available spots when the *view* changes (not on every render)
+  useEffect(() => {
+    if (started && view) setAvailableSpots(getAvailableSettlementSpots());
+    else setAvailableSpots([]);
+    // Depend on the specific fields that actually affect legality
+  }, [
+    started,
+    view?.phase,
+    view?.currentPlayerId,
+    view?.robberOn,
+    view?.tiles,
+    view?.players,
+    view?.bank,
+    view?.turn,
+    view?.nodeOwnership,
+    getAvailableSettlementSpots,
+  ]);
+
   const canStart = (view?.players.length ?? 0) >= 2;
+  const phase = view?.phase ?? 'setupPlacement';
 
   const currentPlayer = useMemo(() => {
     if (!view) return null;
     return view.players.find((p) => p.id === view.currentPlayerId) ?? null;
   }, [view]);
 
-  const phase = view?.phase ?? 'awaitingRoll';
   const canRoll = phase === 'awaitingRoll';
   const canAct = phase === 'awaitingActions';
   const needsRobber = phase === 'awaitingRobberMove';
+  const inSetup = phase === 'setupPlacement';
+
+  const buildPaid = () => {
+    if (!selectedNode || !currentPlayer) return;
+    buildSettlementAt(currentPlayer.id, selectedNode);
+    setSelectedNode(null);
+  };
 
   return (
     <div className='min-h-[calc(100vh-56px)] bg-[#08151F] text-white'>
+      {/* Header */}
       <div className='mx-auto max-w-6xl px-4 py-4'>
         <h1 className='trajanpro-bold text-2xl'>CATAN — Local Tabletop</h1>
         <p className='text-white/70'>
@@ -45,6 +86,7 @@ export default function Game() {
         </p>
       </div>
 
+      {/* Setup controls */}
       {!started && (
         <div className='mx-auto max-w-6xl px-4 py-3'>
           <div className='flex flex-col gap-3 rounded-xl bg-white/5 p-4'>
@@ -98,43 +140,58 @@ export default function Game() {
         </div>
       )}
 
+      {/* In-game panel */}
       {started && view && (
         <div className='mx-auto max-w-6xl px-4 pb-8'>
           {/* Top bar */}
           <div className='mb-4 grid grid-cols-1 gap-3 md:grid-cols-4'>
-            <div className='rounded-xl bg-white/5 p-4'>
-              <div className='text-white/70 text-sm'>Turn</div>
-              <div className='trajanpro-bold text-2xl'>{view.turn}</div>
-            </div>
+            <InfoCard label='Turn' value={String(view.turn)} strong />
+            <InfoCard
+              label='Current Player'
+              value={currentPlayer?.name ?? '—'}
+            />
+            <InfoCard
+              label='Phase'
+              value={phase
+                .replace('awaiting', '▶ ')
+                .replace('setupPlacement', 'Setup Placement')}
+            />
+            <InfoCard
+              label='Last Roll'
+              value={lastRoll ? `${lastRoll.total} (${lastRoll.source})` : '—'}
+            />
+          </div>
 
-            <div className='rounded-xl bg-white/5 p-4'>
-              <div className='text-white/70 text-sm'>Current Player</div>
-              <div className='trajanpro-bold text-xl'>
-                {currentPlayer?.name ?? '—'}
+          {/* Setup Placement */}
+          {inSetup && (
+            <div className='mb-4 rounded-xl bg-white/5 p-4'>
+              <div className='mb-2 trajanpro-bold'>Initial Placement</div>
+              <div className='text-white/70 mb-2'>
+                Current:{' '}
+                <span className='trajanpro-bold'>{currentPlayer?.name}</span>.
+                Choose a legal node:
               </div>
-            </div>
-
-            <div className='rounded-xl bg-white/5 p-4'>
-              <div className='text-white/70 text-sm'>Phase</div>
-              <div className='text-xl capitalize'>
-                {phase.replace('awaiting', '').replace(/([A-Z])/g, ' $1')}
-              </div>
-            </div>
-
-            <div className='rounded-xl bg-white/5 p-4'>
-              <div className='text-white/70 text-sm'>Last Roll</div>
-              <div className='text-xl'>
-                {lastRoll ? (
-                  <>
-                    <span className='trajanpro-bold'>{lastRoll.total}</span>{' '}
-                    <span className='text-white/60'>({lastRoll.source})</span>
-                  </>
-                ) : (
-                  '—'
+              <div className='flex flex-wrap gap-2'>
+                {availableSpots.map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => placeInitialSettlement(n)}
+                    className='rounded-md border border-white/20 px-3 py-1 hover:bg-white/10'
+                  >
+                    {n}
+                  </button>
+                ))}
+                {!availableSpots.length && (
+                  <span className='text-white/60'>
+                    No legal spots available.
+                  </span>
                 )}
               </div>
+              <div className='mt-2 text-sm text-white/60'>
+                Distance rule enforced: no adjacent settlements.
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Actions */}
           <div className='mb-6 flex flex-wrap items-center gap-2'>
@@ -168,31 +225,34 @@ export default function Game() {
               Next Player
             </button>
 
-            {currentPlayer && (
-              <>
+            {canAct && currentPlayer && (
+              <div className='flex flex-wrap items-center gap-2'>
+                <span className='text-white/70'>Build Settlement at:</span>
+                {availableSpots.map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => setSelectedNode(n)}
+                    className={`rounded-md px-3 py-1 border ${
+                      selectedNode === n
+                        ? 'bg-[#96251D] border-[#96251D]'
+                        : 'border-white/20 hover:bg-white/10'
+                    }`}
+                  >
+                    {n}
+                  </button>
+                ))}
                 <button
-                  onClick={() => buildSettlement(currentPlayer.id)}
-                  disabled={!canAct}
+                  disabled={!selectedNode}
+                  onClick={buildPaid}
                   className={`rounded-md px-4 py-2 ${
-                    canAct
+                    selectedNode
                       ? 'bg-[#96251D] hover:opacity-90'
                       : 'bg-white/10 cursor-not-allowed'
                   }`}
                 >
-                  Build Settlement (demo)
+                  Build {selectedNode ? `on ${selectedNode}` : ''}
                 </button>
-                <button
-                  onClick={() => upgradeCity(currentPlayer.id)}
-                  disabled={!canAct}
-                  className={`rounded-md px-4 py-2 ${
-                    canAct
-                      ? 'border border-white/20 hover:bg-white/10'
-                      : 'bg-white/10 cursor-not-allowed'
-                  }`}
-                >
-                  Upgrade to City (demo)
-                </button>
-              </>
+              </div>
             )}
 
             {needsRobber && (
@@ -205,9 +265,13 @@ export default function Game() {
           {/* Tiles + Robber */}
           <div className='mb-6'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Tiles</h2>
-            <div className='grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-6'>
+            <div className='grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-7'>
               {view.tiles.map((t) => {
                 const isRobber = view.robberOn === t.id;
+                const nodeIds = Object.entries(view.nodeAdjacentTiles)
+                  .filter(([, tiles]) => tiles.includes(t.id))
+                  .map(([nid]) => nid as NodeId);
+
                 return (
                   <button
                     key={t.id}
@@ -236,6 +300,25 @@ export default function Game() {
                         <span className='ml-2 text-[#FCDE07]'>Robber</span>
                       )}
                     </div>
+                    <div className='mt-2 text-sm text-white/70'>
+                      Nodes:{' '}
+                      {nodeIds.map((nid) => {
+                        const ownerId = view.nodeOwnership[nid];
+                        const ownerName =
+                          view.players.find((p) => p.id === ownerId)?.name ??
+                          null;
+                        return (
+                          <span key={nid} className='mr-2'>
+                            {nid}
+                            {ownerName && (
+                              <span className='ml-1 text-[#FCDE07]'>
+                                ({ownerName})
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })}
+                    </div>
                   </button>
                 );
               })}
@@ -252,7 +335,18 @@ export default function Game() {
                     <div className='trajanpro-bold text-lg'>{p.name}</div>
                     <div className='text-white/80'>VP: {p.victoryPoints}</div>
                   </div>
-                  <PlayerResources playerId={p.id} />
+                  <PlayerResources
+                    playerId={p.id}
+                    getPlayerResourcesFnRef={getPlayerResourcesFn}
+                    viewVersion={view.turn}
+                  />
+                  <div className='mt-2 text-sm text-white/70'>
+                    Nodes:{' '}
+                    {Object.entries(view.nodeOwnership)
+                      .filter(([, owner]) => owner === p.id)
+                      .map(([nid]) => nid)
+                      .join(', ') || '—'}
+                  </div>
                 </div>
               ))}
             </div>
@@ -283,6 +377,25 @@ export default function Game() {
   );
 }
 
+function InfoCard({
+  label,
+  value,
+  strong,
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+}) {
+  return (
+    <div className='rounded-xl bg-white/5 p-4'>
+      <div className='text-white/70 text-sm'>{label}</div>
+      <div className={strong ? 'trajanpro-bold text-2xl' : 'text-xl'}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
 function KeyValueRow({ label, value }: { label: string; value: number }) {
   return (
     <div className='flex items-center justify-between border-b border-white/10 py-1 text-white/80'>
@@ -292,13 +405,25 @@ function KeyValueRow({ label, value }: { label: string; value: number }) {
   );
 }
 
-function PlayerResources({ playerId }: { playerId: string }) {
-  useGameStore();
-  const engine: any = useGameStore.getState().engine;
-  const internal = engine?.players?.get?.(playerId);
-  const res = internal?.resources ?? {};
-  const rows = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'] as const;
+/**
+ * IMPORTANT: don’t subscribe to the store with a selector that RETURNS A NEW OBJECT EVERY TIME.
+ * Instead, read via a ref to the action, and memoize on a stable dependency (e.g., view.turn).
+ */
+function PlayerResources({
+  playerId,
+  getPlayerResourcesFnRef,
+  viewVersion,
+}: {
+  playerId: string;
+  getPlayerResourcesFnRef: React.MutableRefObject<(pid: string) => any>;
+  viewVersion: number; // bump when view changes (turn is fine)
+}) {
+  const res = useMemo(() => {
+    return getPlayerResourcesFnRef.current(playerId);
+    // recompute when the game view advances; using view.turn is a simple stable signal
+  }, [playerId, viewVersion]);
 
+  const rows = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'] as const;
   return (
     <div className='mt-2 grid grid-cols-2 gap-2'>
       {rows.map((r) => (
@@ -307,7 +432,7 @@ function PlayerResources({ playerId }: { playerId: string }) {
           className='flex items-center justify-between rounded-md bg-white/5 px-3 py-2'
         >
           <span className='text-white/70'>{r}</span>
-          <span className='trajanpro-bold'>{res[r] ?? 0}</span>
+          <span className='trajanpro-bold'>{(res as any)[r] ?? 0}</span>
         </div>
       ))}
     </div>

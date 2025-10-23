@@ -3,8 +3,14 @@ import {
   CatanEngine,
   DiceApiRandomService,
   FourToOneTradingService,
-  type PublicGameView,
+  type IRandomService,
+  type ITradingService,
 } from '../game/catan-core';
+import type {
+  PublicGameView,
+  ResourceBundle,
+  NodeId,
+} from '../game/catan-core-types';
 
 type RollInfo = { total: number; source: 'api' | 'local' };
 
@@ -14,18 +20,27 @@ type GameState = {
   started: boolean;
   lastRoll: RollInfo | null;
   messages: string[];
+  playerSeq: number;
 
+  // lifecycle
   init(): void;
   reset(): void;
   addPlayer(name: string): void;
   startGame(firstPlayerId?: string): void;
 
+  // placement
+  getAvailableSettlementSpots(): NodeId[];
+  placeInitialSettlement(nodeId: NodeId): void;
+
+  // gameplay
   roll(): Promise<void>;
   nextPlayer(): void;
   moveRobber(tileId: string, stealFromPlayerId?: string): void;
+  buildSettlementAt(playerId: string, nodeId: NodeId): void;
+  upgradeCity(playerId: string, nodeId: NodeId): void;
 
-  buildSettlement(playerId: string): void;
-  upgradeCity(playerId: string): void;
+  // info
+  getPlayerResources(playerId: string): ResourceBundle;
 };
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -34,18 +49,19 @@ export const useGameStore = create<GameState>((set, get) => ({
   started: false,
   lastRoll: null,
   messages: [],
+  playerSeq: 1,
 
   init() {
-    const engine = new CatanEngine(
-      new DiceApiRandomService(),
-      new FourToOneTradingService()
-    );
+    const rng: IRandomService = new DiceApiRandomService();
+    const trader: ITradingService = new FourToOneTradingService();
+    const engine = new CatanEngine(rng, trader);
     set({
       engine,
       view: engine.getPublicState(),
       started: false,
       lastRoll: null,
       messages: ['Game initialized.'],
+      playerSeq: 1,
     });
   },
 
@@ -57,13 +73,13 @@ export const useGameStore = create<GameState>((set, get) => ({
   addPlayer(name: string) {
     const { engine } = get();
     if (!engine) return;
-    const id = `p${
-      (engine as any)._idInc
-        ? (engine as any)._idInc++
-        : ((engine as any)._idInc = 1)
-    }`;
-    engine.addPlayer(id, name.trim() || `Player ${id}`);
-    set({ view: engine.getPublicState() });
+    const seq = get().playerSeq;
+    const id = `p${seq}`;
+    engine.addPlayer(id, name.trim() || `Player ${seq}`);
+    set({
+      view: engine.getPublicState(),
+      playerSeq: seq + 1,
+    });
   },
 
   startGame(firstPlayerId) {
@@ -74,11 +90,40 @@ export const useGameStore = create<GameState>((set, get) => ({
       started: true,
       view: engine.getPublicState(),
       messages: [
-        'Game started! Everyone received 1 settlement and a starter pack.',
+        ...get().messages,
+        'Setup: each player must place 2 settlements (distance rule applies).',
       ],
     });
   },
 
+  // ----- Placement -----
+  getAvailableSettlementSpots() {
+    const { engine } = get();
+    if (!engine) return [];
+    return engine.getAvailableSettlementSpots();
+  },
+
+  placeInitialSettlement(nodeId) {
+    const { engine } = get();
+    if (!engine) return;
+    const currentId = engine.getPublicState().currentPlayerId!;
+    try {
+      engine.placeInitialSettlement(currentId, nodeId);
+      set({
+        view: engine.getPublicState(),
+        messages: [
+          ...get().messages,
+          `Placed initial settlement on ${nodeId}.`,
+        ],
+      });
+    } catch (e: any) {
+      set((s) => ({
+        messages: [...s.messages, e?.message || 'Cannot place there.'],
+      }));
+    }
+  },
+
+  // ----- Gameplay -----
   async roll() {
     const { engine } = get();
     if (!engine) return;
@@ -133,17 +178,18 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
-  buildSettlement(playerId) {
+  buildSettlementAt(playerId, nodeId) {
     const { engine } = get();
     if (!engine) return;
     try {
-      const nodeId = `N${Math.floor(Math.random() * 999)}`;
-      const ok = engine.buildSettlement(playerId, nodeId);
+      const ok = engine.buildSettlementAt(playerId, nodeId);
       set({
         view: engine.getPublicState(),
         messages: [
           ...get().messages,
-          ok ? `Settlement built at ${nodeId}.` : 'Not enough resources.',
+          ok
+            ? `Built settlement on ${nodeId}.`
+            : 'Not enough resources / invalid spot.',
         ],
       });
     } catch (e: any) {
@@ -153,26 +199,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
-  upgradeCity(playerId) {
+  upgradeCity(playerId, nodeId) {
     const { engine } = get();
     if (!engine) return;
     try {
-      const internal = (engine as any).players?.get?.(playerId);
-      const firstSettlement: string | undefined = internal
-        ? (Array.from(internal.settlements)[0] as string | undefined)
-        : undefined;
-      if (!firstSettlement) {
-        set((s) => ({
-          messages: [...s.messages, 'No settlement to upgrade.'],
-        }));
-        return;
-      }
-      const ok = engine.upgradeToCity(playerId, firstSettlement);
+      const ok = engine.upgradeToCity(playerId, nodeId);
       set({
         view: engine.getPublicState(),
         messages: [
           ...get().messages,
-          ok ? `Upgraded ${firstSettlement} to City.` : 'Not enough resources.',
+          ok ? `Upgraded ${nodeId} to City.` : 'Not enough resources.',
         ],
       });
     } catch (e: any) {
@@ -180,5 +216,11 @@ export const useGameStore = create<GameState>((set, get) => ({
         messages: [...s.messages, e?.message || 'Cannot upgrade now.'],
       }));
     }
+  },
+
+  // ----- Info -----
+  getPlayerResources(playerId) {
+    const { engine } = get();
+    return engine ? engine.getPlayerResources(playerId) : {};
   },
 }));
