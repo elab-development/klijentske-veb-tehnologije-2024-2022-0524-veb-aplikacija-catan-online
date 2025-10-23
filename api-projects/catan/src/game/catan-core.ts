@@ -36,7 +36,8 @@ export interface ITradingService {
 
 // ---------- Dice API client implementing IRandomService ----------
 export class DiceApiRandomService implements IRandomService {
-  private endpoint = 'https://roll.diceapi.com/json/2d6';
+  // use the Vite dev proxy
+  private endpoint = '/qrand/api/random/dice?n=2';
 
   async rollDice(): Promise<{
     dice1: number;
@@ -45,23 +46,19 @@ export class DiceApiRandomService implements IRandomService {
     source: 'api' | 'local';
   }> {
     try {
-      const res = await fetch(this.endpoint, { cache: 'no-store' });
+      const res = await fetch(this.endpoint);
       if (!res.ok) throw new Error(`Dice API HTTP ${res.status}`);
-      const data = (await res.json()) as {
-        dice: Array<{ value: number }>;
-        total: number;
-      };
-      const [dice1, dice2] = [
-        data.dice?.[0]?.value ?? 1,
-        data.dice?.[1]?.value ?? 1,
-      ];
-      const total = typeof data.total === 'number' ? data.total : dice1 + dice2;
+      const data = await res.json();
+      if (!Array.isArray(data.dice) || data.dice.length < 2) {
+        throw new Error('Malformed payload (missing dice array).');
+      }
+      const [dice1, dice2] = data.dice;
       if (
         ![dice1, dice2].every((n) => Number.isInteger(n) && n >= 1 && n <= 6)
       ) {
-        throw new Error('Dice API returned unexpected payload.');
+        throw new Error('Dice out of range.');
       }
-      return { dice1, dice2, total, source: 'api' };
+      return { dice1, dice2, total: dice1 + dice2, source: 'api' };
     } catch {
       // Offline / fallback RNG to keep the app playable
       const dice1 = 1 + Math.floor(Math.random() * 6);

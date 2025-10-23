@@ -37,7 +37,6 @@ type GameState = {
   nextPlayer(): void;
   moveRobber(tileId: string, stealFromPlayerId?: string): void;
   buildSettlementAt(playerId: string, nodeId: NodeId): void;
-  upgradeCity(playerId: string, nodeId: NodeId): void;
 
   // info
   getPlayerResources(playerId: string): ResourceBundle;
@@ -195,25 +194,6 @@ export const useGameStore = create<GameState>((set, get) => ({
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot build now.'],
-      }));
-    }
-  },
-
-  upgradeCity(playerId, nodeId) {
-    const { engine } = get();
-    if (!engine) return;
-    try {
-      const ok = engine.upgradeToCity(playerId, nodeId);
-      set({
-        view: engine.getPublicState(),
-        messages: [
-          ...get().messages,
-          ok ? `Upgraded ${nodeId} to City.` : 'Not enough resources.',
-        ],
-      });
-    } catch (e: any) {
-      set((s) => ({
-        messages: [...s.messages, e?.message || 'Cannot upgrade now.'],
       }));
     }
   },
