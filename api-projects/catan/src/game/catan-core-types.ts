@@ -1,4 +1,4 @@
-// Shared types & interfaces used by the engine and UI
+// Core types shared across engine, store, and UI
 
 export type ResourceType =
   | 'Brick'
@@ -20,8 +20,8 @@ export const ResourceType = {
 export type ResourceBundle = Partial<Record<ResourceType, number>>;
 
 export type TileId = string;
-export type NodeId = string;
-export type EdgeId = string;
+export type NodeId = string; // settlement/city spot
+export type EdgeId = string; // (reserved for roads later)
 
 export interface Tile {
   id: TileId;
@@ -40,10 +40,10 @@ export interface PlayerState {
 }
 
 export type TurnPhase =
-  | 'setupPlacement' // players place their initial 2 settlements each
+  | 'setupPlacement'
   | 'awaitingRoll'
-  | 'awaitingRobberMove'
-  | 'awaitingActions';
+  | 'awaitingActions'
+  | 'awaitingRobberMove';
 
 export interface PublicGameView {
   players: Array<Pick<PlayerState, 'id' | 'name' | 'victoryPoints'>>;
@@ -54,7 +54,8 @@ export interface PublicGameView {
   turn: number;
   phase: TurnPhase;
 
-  // Placement helpers for UI
-  nodeOwnership: Record<NodeId, string | null>; // playerId or null
-  nodeAdjacentTiles: Record<NodeId, TileId[]>; // which tiles touch each node
+  // geometry / ownership for UI
+  nodeOwnership: Record<NodeId, string | null>;
+  nodeAdjacentTiles: Record<NodeId, TileId[]>;
+  nodeAnchors: Record<NodeId, { tileId: TileId; cornerIndex: number }>;
 }

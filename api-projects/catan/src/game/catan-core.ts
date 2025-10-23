@@ -9,10 +9,12 @@ import {
   type TurnPhase,
   type PublicGameView,
 } from './catan-core-types';
-import { miniTiles, miniNodes } from './board-presets';
 
-// ---------- Interfaces ----------
+import { standard19Tiles, standard19Nodes } from './board-presets';
+
+// ---------- Interfaces (with methods) ----------
 export interface IRandomService {
+  /** Roll two six-sided dice; return both dice and the total. */
   rollDice(): Promise<{
     dice1: number;
     dice2: number;
@@ -20,6 +22,8 @@ export interface IRandomService {
     source: 'api' | 'local';
   }>;
 }
+
+/** Trading rules abstraction (so you can swap 4:1 rules, harbor variants later). */
 export interface ITradingService {
   tradeWithBank(
     player: PlayerState,
@@ -27,13 +31,20 @@ export interface ITradingService {
     give: ResourceBundle,
     receive: ResourceBundle
   ): boolean;
+
   hasResources(player: PlayerState, bundle: ResourceBundle): boolean;
 }
 
-// ---------- Dice API client ----------
+// ---------- Dice API client implementing IRandomService ----------
 export class DiceApiRandomService implements IRandomService {
   private endpoint = 'https://roll.diceapi.com/json/2d6';
-  async rollDice() {
+
+  async rollDice(): Promise<{
+    dice1: number;
+    dice2: number;
+    total: number;
+    source: 'api' | 'local';
+  }> {
     try {
       const res = await fetch(this.endpoint, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Dice API HTTP ${res.status}`);
@@ -41,24 +52,27 @@ export class DiceApiRandomService implements IRandomService {
         dice: Array<{ value: number }>;
         total: number;
       };
-      const d1 = data.dice?.[0]?.value ?? 1;
-      const d2 = data.dice?.[1]?.value ?? 1;
-      const total = typeof data.total === 'number' ? data.total : d1 + d2;
+      const [dice1, dice2] = [
+        data.dice?.[0]?.value ?? 1,
+        data.dice?.[1]?.value ?? 1,
+      ];
+      const total = typeof data.total === 'number' ? data.total : dice1 + dice2;
       if (
-        ![d1, d2, total].every((n) => Number.isInteger(n) && n >= 1 && n <= 12)
+        ![dice1, dice2].every((n) => Number.isInteger(n) && n >= 1 && n <= 6)
       ) {
-        throw new Error('Dice API payload invalid');
+        throw new Error('Dice API returned unexpected payload.');
       }
-      return { dice1: d1, dice2: d2, total, source: 'api' as const };
+      return { dice1, dice2, total, source: 'api' };
     } catch {
-      const d1 = 1 + Math.floor(Math.random() * 6);
-      const d2 = 1 + Math.floor(Math.random() * 6);
-      return { dice1: d1, dice2: d2, total: d1 + d2, source: 'local' as const };
+      // Offline / fallback RNG to keep the app playable
+      const dice1 = 1 + Math.floor(Math.random() * 6);
+      const dice2 = 1 + Math.floor(Math.random() * 6);
+      return { dice1, dice2, total: dice1 + dice2, source: 'local' };
     }
   }
 }
 
-// ---------- Helpers ----------
+// ---------- utils ----------
 const EMPTY_BUNDLE = (): ResourceBundle => ({
   [ResourceType.Brick]: 0,
   [ResourceType.Lumber]: 0,
@@ -67,42 +81,60 @@ const EMPTY_BUNDLE = (): ResourceBundle => ({
   [ResourceType.Ore]: 0,
   [ResourceType.Desert]: 0,
 });
-const addBundles = (a: ResourceBundle, b: ResourceBundle) => {
-  for (const k of Object.values(ResourceType))
-    if (k !== ResourceType.Desert) a[k] = (a[k] ?? 0) + (b[k] ?? 0);
-};
-const subBundles = (a: ResourceBundle, b: ResourceBundle) => {
-  for (const k of Object.values(ResourceType))
-    if (k !== ResourceType.Desert) a[k] = (a[k] ?? 0) - (b[k] ?? 0);
-};
-const bundleCount = (b: ResourceBundle) =>
-  Object.entries(b)
-    .filter(([k, v]) => k !== ResourceType.Desert && typeof v === 'number')
-    .reduce((s, [, v]) => s + (typeof v === 'number' ? v : 0), 0);
 
-// ---------- Engine ----------
+function addBundles(target: ResourceBundle, delta: ResourceBundle) {
+  for (const key of Object.values(ResourceType)) {
+    if (key === ResourceType.Desert) continue;
+    target[key] = (target[key] ?? 0) + (delta[key] ?? 0);
+  }
+}
+function subBundles(target: ResourceBundle, delta: ResourceBundle) {
+  for (const key of Object.values(ResourceType)) {
+    if (key === ResourceType.Desert) continue;
+    target[key] = (target[key] ?? 0) - (delta[key] ?? 0);
+  }
+}
+function bundleCount(bundle: ResourceBundle): number {
+  let sum = 0;
+  for (const [k, v] of Object.entries(bundle)) {
+    if (k === ResourceType.Desert) continue;
+    sum += v ?? 0;
+  }
+  return sum;
+}
+
+// ---------- Core Catan Engine ----------
 export class CatanEngine {
   private tiles: Tile[];
-  private players: Map<string, PlayerState> = new Map();
   private bank: ResourceBundle;
+  private players: Map<string, PlayerState>;
+
   private currentPlayerOrder: string[] = [];
   private currentIdx = 0;
   private robberOn: TileId;
   private turn = 0;
   private phase: TurnPhase = 'setupPlacement';
 
-  // Geometry state
-  private nodeOwnership: Map<NodeId, string | null> = new Map();
-  private nodeAdjacentTiles: Map<NodeId, TileId[]> = new Map();
-  private nodeNeighbors: Map<NodeId, NodeId[]> = new Map();
-  private initialPlacementsDone: Map<string, number> = new Map(); // playerId -> count (0..2)
+  // setup placement snake
+  private setupRound = 1; // 1 then 2
+  private setupDirection: 1 | -1 = 1; // forward then reverse
+
+  // geometry & ownership
+  private nodeOwnership = new Map<NodeId, string | null>();
+  private nodeAdjacentTiles = new Map<NodeId, TileId[]>();
+  private nodeNeighbors = new Map<NodeId, NodeId[]>();
+  private nodeAnchors = new Map<
+    NodeId,
+    { tileId: TileId; cornerIndex: number }
+  >();
+  private tileToNodes = new Map<TileId, NodeId[]>();
 
   constructor(
     private readonly rng: IRandomService,
     private readonly trader: ITradingService,
     config?: { tiles?: Tile[]; initialBank?: ResourceBundle }
   ) {
-    this.tiles = config?.tiles ?? miniTiles;
+    this.tiles = config?.tiles ?? standard19Tiles;
     this.robberOn =
       this.tiles.find((t) => t.resource === ResourceType.Desert)?.id ??
       this.tiles[0].id;
@@ -114,16 +146,28 @@ export class CatanEngine {
       [ResourceType.Ore]: 19,
       [ResourceType.Desert]: 0,
     };
+    this.players = new Map();
 
-    // Seed geometry maps
-    for (const n of miniNodes) {
+    // seed geometry
+    for (const n of standard19Nodes) {
       this.nodeOwnership.set(n.id, null);
       this.nodeAdjacentTiles.set(n.id, [...n.adjacentTiles]);
       this.nodeNeighbors.set(n.id, [...n.neighborNodes]);
+      this.nodeAnchors.set(n.id, {
+        tileId: n.anchorTileId,
+        cornerIndex: n.cornerIndex,
+      });
+    }
+    // reverse index: tile -> nodes touching it
+    for (const [nodeId, tiles] of this.nodeAdjacentTiles.entries()) {
+      for (const tid of tiles) {
+        if (!this.tileToNodes.has(tid)) this.tileToNodes.set(tid, []);
+        this.tileToNodes.get(tid)!.push(nodeId);
+      }
     }
   }
 
-  // ----- Setup -----
+  // ----- lifecycle -----
   addPlayer(id: string, name: string) {
     if (this.players.has(id)) throw new Error('Player id exists.');
     this.players.set(id, {
@@ -136,118 +180,88 @@ export class CatanEngine {
       victoryPoints: 0,
     });
     this.currentPlayerOrder = Array.from(this.players.keys());
-    this.initialPlacementsDone.set(id, 0);
   }
 
   startGame(firstPlayerId?: string) {
     if (this.players.size < 2) throw new Error('Need at least 2 players.');
-    if (firstPlayerId && !this.players.has(firstPlayerId))
+    if (firstPlayerId && !this.players.has(firstPlayerId)) {
       throw new Error('Unknown first player.');
+    }
 
     if (firstPlayerId) {
       const order = Array.from(this.players.keys());
       const idx = order.indexOf(firstPlayerId);
       this.currentPlayerOrder = order.slice(idx).concat(order.slice(0, idx));
     }
+
     this.turn = 1;
     this.currentIdx = 0;
-    this.phase = 'setupPlacement'; // everyone must place 2 settlements
+    this.phase = 'setupPlacement';
+    this.setupRound = 1;
+    this.setupDirection = 1;
   }
 
   get currentPlayer(): PlayerState | null {
-    if (!this.currentPlayerOrder.length) return null;
-    return this.players.get(this.currentPlayerOrder[this.currentIdx]) ?? null;
-  }
-  get currentPhase(): TurnPhase {
-    return this.phase;
+    if (this.currentPlayerOrder.length === 0) return null;
+    const id = this.currentPlayerOrder[this.currentIdx];
+    return this.players.get(id) ?? null;
   }
 
-  // ----- Placement helpers -----
-  /** Distance rule: empty node & no adjacent node with a settlement/city */
+  // ----- setup placement -----
   getAvailableSettlementSpots(): NodeId[] {
-    const results: NodeId[] = [];
-    for (const [nodeId, owner] of this.nodeOwnership.entries()) {
-      if (owner) continue;
-      const neighbors = this.nodeNeighbors.get(nodeId) ?? [];
-      const blocked = neighbors.some((n) => !!this.nodeOwnership.get(n));
-      if (!blocked) results.push(nodeId);
+    const spots: NodeId[] = [];
+    for (const [nid, owner] of this.nodeOwnership.entries()) {
+      if (owner) continue; // occupied
+      // distance rule: no adjacent owned nodes
+      const neighbors = this.nodeNeighbors.get(nid) ?? [];
+      const blocked = neighbors.some(
+        (n) => (this.nodeOwnership.get(n) ?? null) !== null
+      );
+      if (blocked) continue;
+      spots.push(nid);
     }
-    return results;
+    return spots;
   }
 
-  /** Setup placement (free). Each player places 2, then game moves to awaitingRoll. */
   placeInitialSettlement(playerId: string, nodeId: NodeId) {
-    if (this.phase !== 'setupPlacement')
-      throw new Error('Not in setup placement.');
-    const player = this.players.get(playerId);
-    if (!player) throw new Error('Unknown player');
-
-    this.ensureSettlementSpot(nodeId); // throws if invalid
-    this.nodeOwnership.set(nodeId, playerId);
-    player.settlements.add(nodeId);
-    player.victoryPoints += 1;
-
-    const placed = (this.initialPlacementsDone.get(playerId) ?? 0) + 1;
-    this.initialPlacementsDone.set(playerId, placed);
-
-    // After all players have placed two, start normal turns
-    const allDone = Array.from(this.initialPlacementsDone.values()).every(
-      (c) => c >= 2
-    );
-    if (allDone) {
-      this.phase = 'awaitingRoll';
-    } else {
-      // simple round robin (no snake to keep it lightweight)
-      this.currentIdx = (this.currentIdx + 1) % this.currentPlayerOrder.length;
-    }
-  }
-
-  /** Paid build during Actions phase */
-  buildSettlementAt(playerId: string, nodeId: NodeId): boolean {
-    this.assertActionsPhase();
+    if (this.phase !== 'setupPlacement') throw new Error('Not in setup phase.');
     const p = this.players.get(playerId);
-    if (!p) return false;
-    if (!this.ensureSettlementSpot(nodeId, false)) return false;
+    if (!p) throw new Error('Unknown player.');
+    if ((this.nodeOwnership.get(nodeId) ?? null) !== null)
+      throw new Error('Spot occupied.');
+    // enforce distance rule
+    const neighbors = this.nodeNeighbors.get(nodeId) ?? [];
+    if (neighbors.some((n) => (this.nodeOwnership.get(n) ?? null) !== null)) {
+      throw new Error('Too close to another settlement.');
+    }
 
-    const cost: ResourceBundle = {
-      [ResourceType.Brick]: 1,
-      [ResourceType.Lumber]: 1,
-      [ResourceType.Wool]: 1,
-      [ResourceType.Grain]: 1,
-    };
-    if (!this.trader.hasResources(p, cost)) return false;
-
-    subBundles(p.resources, cost);
-    addBundles(this.bank, cost);
-
+    // place
     this.nodeOwnership.set(nodeId, playerId);
     p.settlements.add(nodeId);
     p.victoryPoints += 1;
-    return true;
+
+    // advance snake order
+    const lastIndex = this.currentPlayerOrder.length - 1;
+    if (this.setupRound === 1) {
+      if (this.currentIdx === lastIndex) {
+        this.setupRound = 2;
+        this.setupDirection = -1;
+      } else {
+        this.currentIdx++;
+      }
+    } else {
+      // round 2
+      if (this.currentIdx === 0) {
+        // setup complete -> start normal turns from player 0
+        this.phase = 'awaitingRoll';
+        this.currentIdx = 0;
+      } else {
+        this.currentIdx--;
+      }
+    }
   }
 
-  upgradeToCity(playerId: string, nodeId: NodeId): boolean {
-    this.assertActionsPhase();
-    const p = this.players.get(playerId);
-    if (!p || !p.settlements.has(nodeId)) return false;
-
-    const cost: ResourceBundle = {
-      [ResourceType.Grain]: 2,
-      [ResourceType.Ore]: 3,
-    };
-    if (!this.trader.hasResources(p, cost)) return false;
-
-    subBundles(p.resources, cost);
-    addBundles(this.bank, cost);
-
-    p.settlements.delete(nodeId);
-    p.cities.add(nodeId);
-    p.victoryPoints += 1; // settlement(1) -> city(2): net +1
-    this.nodeOwnership.set(nodeId, playerId); // stays owned by same player
-    return true;
-  }
-
-  // ----- Turn flow -----
+  // ----- gameplay flow -----
   async rollAndDistribute(): Promise<{
     total: number;
     source: 'api' | 'local';
@@ -265,11 +279,19 @@ export class CatanEngine {
     return { total: roll.total, source: roll.source };
   }
 
+  nextPlayer() {
+    if (this.phase !== 'awaitingActions')
+      throw new Error('Finish actions first.');
+    this.currentIdx = (this.currentIdx + 1) % this.currentPlayerOrder.length;
+    this.turn += 1;
+    this.phase = 'awaitingRoll';
+  }
+
   moveRobber(toTile: TileId, stealFromPlayerId?: string) {
-    if (this.phase !== 'awaitingRobberMove')
-      throw new Error('You can only move the robber now.');
     if (!this.tiles.find((t) => t.id === toTile))
       throw new Error('Unknown tile.');
+    const wasAwaitingRobber = this.phase === 'awaitingRobberMove';
+
     this.robberOn = toTile;
 
     if (stealFromPlayerId) {
@@ -290,66 +312,31 @@ export class CatanEngine {
         }
       }
     }
-    this.phase = 'awaitingActions';
+
+    if (wasAwaitingRobber) this.phase = 'awaitingActions';
   }
 
-  maritimeTrade(
-    playerId: string,
-    give: ResourceBundle,
-    receive: ResourceBundle
-  ): boolean {
-    this.assertActionsPhase();
-    const p = this.players.get(playerId);
-    if (!p) return false;
-    return this.trader.tradeWithBank(p, this.bank, give, receive);
-  }
-
-  nextPlayer() {
-    if (this.phase !== 'awaitingActions')
-      throw new Error('Finish your roll/robber before ending turn.');
-    this.currentIdx = (this.currentIdx + 1) % this.currentPlayerOrder.length;
-    this.turn += 1;
-    this.phase = 'awaitingRoll';
-  }
-
-  // ----- Production using node adjacency -----
   private distributeFor(numberToken: number) {
-    const hitTiles = this.tiles.filter(
+    // find tiles with this number (and not under robber)
+    const tiles = this.tiles.filter(
       (t) => t.numberToken === numberToken && t.id !== this.robberOn
     );
-    if (hitTiles.length === 0) return;
 
-    const hitSet = new Set(hitTiles.map((t) => t.id));
+    for (const tile of tiles) {
+      const nodes = this.tileToNodes.get(tile.id) ?? [];
+      for (const nid of nodes) {
+        const ownerId = this.nodeOwnership.get(nid);
+        if (!ownerId) continue;
+        const player = this.players.get(ownerId)!;
 
-    // For each owned node, pay for each adjacent hit tile
-    for (const p of this.players.values()) {
-      // settlements: +1 per hit adjacent tile
-      for (const nodeId of p.settlements) {
-        const tileIds = this.nodeAdjacentTiles.get(nodeId) ?? [];
-        for (const tId of tileIds) {
-          if (!hitSet.has(tId)) continue;
-          const tile = this.tiles.find((t) => t.id === tId)!;
-          if (tile.resource === ResourceType.Desert) continue;
-          if ((this.bank[tile.resource] ?? 0) > 0) {
-            p.resources[tile.resource] = (p.resources[tile.resource] ?? 0) + 1;
-            this.bank[tile.resource]! -= 1;
-          }
-        }
-      }
-      // cities: +2 per hit adjacent tile
-      for (const nodeId of p.cities) {
-        const tileIds = this.nodeAdjacentTiles.get(nodeId) ?? [];
-        for (const tId of tileIds) {
-          if (!hitSet.has(tId)) continue;
-          const tile = this.tiles.find((t) => t.id === tId)!;
-          if (tile.resource === ResourceType.Desert) continue;
-          const can = Math.min(2, this.bank[tile.resource] ?? 0);
-          if (can > 0) {
-            p.resources[tile.resource] =
-              (p.resources[tile.resource] ?? 0) + can;
-            this.bank[tile.resource]! -= can;
-          }
-        }
+        const isCity = player.cities.has(nid);
+        const gain = isCity ? 2 : 1;
+
+        if ((this.bank[tile.resource] ?? 0) <= 0) continue;
+        const actual = Math.min(gain, this.bank[tile.resource] ?? 0);
+        player.resources[tile.resource] =
+          (player.resources[tile.resource] ?? 0) + actual;
+        this.bank[tile.resource]! -= actual;
       }
     }
   }
@@ -364,69 +351,8 @@ export class CatanEngine {
     }
   }
 
-  // ----- Views -----
-  getPublicState(): PublicGameView {
-    const nodeOwnership: Record<NodeId, string | null> = {};
-    const nodeAdjacentTiles: Record<NodeId, TileId[]> = {};
-    for (const [n, owner] of this.nodeOwnership.entries())
-      nodeOwnership[n] = owner;
-    for (const [n, tiles] of this.nodeAdjacentTiles.entries())
-      nodeAdjacentTiles[n] = tiles;
-
-    return {
-      players: Array.from(this.players.values()).map((p) => ({
-        id: p.id,
-        name: p.name,
-        victoryPoints: p.victoryPoints,
-      })),
-      robberOn: this.robberOn,
-      bank: { ...this.bank },
-      tiles: [...this.tiles],
-      currentPlayerId: this.currentPlayer?.id ?? null,
-      turn: this.turn,
-      phase: this.phase,
-      nodeOwnership,
-      nodeAdjacentTiles,
-    };
-  }
-
-  /** Safe accessor for UI (avoids peeking internals) */
-  getPlayerResources(playerId: string): ResourceBundle {
-    const p = this.players.get(playerId);
-    return p ? { ...p.resources } : {};
-  }
-
-  // ----- Internals -----
-  private assertActionsPhase() {
-    if (this.phase !== 'awaitingActions')
-      throw new Error('You can only do that in the Actions phase.');
-  }
-
-  /** Validates node is empty & passes distance rule. Throws (setup) or returns boolean (actions). */
-  private ensureSettlementSpot(
-    nodeId: NodeId,
-    throwOnFail: boolean = true
-  ): boolean {
-    if (!this.nodeOwnership.has(nodeId)) {
-      if (throwOnFail) throw new Error('Unknown node.');
-      return false;
-    }
-    if (this.nodeOwnership.get(nodeId)) {
-      if (throwOnFail) throw new Error('Spot already taken.');
-      return false;
-    }
-    const neighbors = this.nodeNeighbors.get(nodeId) ?? [];
-    const blocked = neighbors.some((n) => !!this.nodeOwnership.get(n));
-    if (blocked) {
-      if (throwOnFail)
-        throw new Error('Too close to another settlement (distance rule).');
-      return false;
-    }
-    return true;
-  }
-
   private discardEvenly(p: PlayerState, toDiscard: number) {
-    const order: ResourceType[] = [
+    const order: (keyof ResourceBundle)[] = [
       ResourceType.Brick,
       ResourceType.Lumber,
       ResourceType.Wool,
@@ -447,9 +373,110 @@ export class CatanEngine {
       if (!did) break;
     }
   }
+
+  // ----- building (paid during actions) -----
+  buildSettlementAt(playerId: string, nodeId: NodeId): boolean {
+    if (this.phase !== 'awaitingActions') throw new Error('Cannot build now.');
+    const p = this.players.get(playerId);
+    if (!p) return false;
+    if ((this.nodeOwnership.get(nodeId) ?? null) !== null) return false;
+
+    // distance rule
+    const neighbors = this.nodeNeighbors.get(nodeId) ?? [];
+    if (neighbors.some((n) => (this.nodeOwnership.get(n) ?? null) !== null))
+      return false;
+
+    const cost: ResourceBundle = {
+      [ResourceType.Brick]: 1,
+      [ResourceType.Lumber]: 1,
+      [ResourceType.Wool]: 1,
+      [ResourceType.Grain]: 1,
+    };
+    if (!this.trader.hasResources(p, cost)) return false;
+
+    subBundles(p.resources, cost);
+    addBundles(this.bank, cost);
+
+    this.nodeOwnership.set(nodeId, playerId);
+    p.settlements.add(nodeId);
+    p.victoryPoints += 1;
+    return true;
+  }
+
+  upgradeToCity(playerId: string, nodeId: NodeId): boolean {
+    if (this.phase !== 'awaitingActions')
+      throw new Error('Cannot upgrade now.');
+    const p = this.players.get(playerId);
+    if (!p) return false;
+    if (!p.settlements.has(nodeId)) return false; // must own settlement here
+
+    const cost: ResourceBundle = {
+      [ResourceType.Grain]: 2,
+      [ResourceType.Ore]: 3,
+    };
+    if (!this.trader.hasResources(p, cost)) return false;
+
+    subBundles(p.resources, cost);
+    addBundles(this.bank, cost);
+
+    p.settlements.delete(nodeId);
+    p.cities.add(nodeId);
+    p.victoryPoints += 1;
+    return true;
+  }
+
+  maritimeTrade(
+    playerId: string,
+    give: ResourceBundle,
+    receive: ResourceBundle
+  ): boolean {
+    const p = this.players.get(playerId);
+    if (!p) return false;
+    return this.trader.tradeWithBank(p, this.bank, give, receive);
+  }
+
+  // ----- info -----
+  getPublicState(): PublicGameView {
+    const nodeOwnership: Record<NodeId, string | null> = {};
+    const nodeAdjacentTiles: Record<NodeId, TileId[]> = {};
+    const nodeAnchors: Record<NodeId, { tileId: TileId; cornerIndex: number }> =
+      {};
+
+    for (const [nid, owner] of this.nodeOwnership.entries())
+      nodeOwnership[nid] = owner ?? null;
+    for (const [nid, tiles] of this.nodeAdjacentTiles.entries())
+      nodeAdjacentTiles[nid] = [...tiles];
+    for (const [nid, anchor] of this.nodeAnchors.entries())
+      nodeAnchors[nid] = {
+        tileId: anchor.tileId,
+        cornerIndex: anchor.cornerIndex,
+      };
+
+    return {
+      players: Array.from(this.players.values()).map((p) => ({
+        id: p.id,
+        name: p.name,
+        victoryPoints: p.victoryPoints,
+      })),
+      robberOn: this.robberOn,
+      bank: { ...this.bank },
+      tiles: [...this.tiles],
+      currentPlayerId: this.currentPlayer?.id ?? null,
+      turn: this.turn,
+      phase: this.phase,
+      nodeOwnership,
+      nodeAdjacentTiles,
+      nodeAnchors,
+    };
+  }
+
+  getPlayerResources(playerId: string): ResourceBundle {
+    const p = this.players.get(playerId);
+    return p ? { ...p.resources } : {};
+  }
 }
 
-// ---------- Trading (4:1) ----------
+// ---------- Trading 4:1 ----------
 export class FourToOneTradingService implements ITradingService {
   hasResources(player: PlayerState, bundle: ResourceBundle): boolean {
     for (const [res, qty] of Object.entries(bundle) as Array<
@@ -466,29 +493,28 @@ export class FourToOneTradingService implements ITradingService {
     give: ResourceBundle,
     receive: ResourceBundle
   ): boolean {
-    const g = Object.entries(give).filter(
-      ([_, v]) => typeof v === 'number' && v > 0
+    const entries = Object.entries(give).filter(
+      ([_, v]) => (v ?? 0) > 0
     ) as Array<[ResourceType, number]>;
-    if (g.length !== 1) return false;
-    const [giveType, giveQty] = g[0];
-    if (giveType === ResourceType.Desert || giveQty % 4 !== 0) return false;
+    if (entries.length !== 1) return false;
 
-    const r = Object.entries(receive).filter(
-      ([_, v]) => typeof v === 'number' && v > 0
+    const [giveType, giveQty] = entries[0];
+    if (giveType === ResourceType.Desert) return false;
+    if (giveQty % 4 !== 0) return false;
+
+    const recvEntries = Object.entries(receive).filter(
+      ([_, v]) => (v ?? 0) > 0
     ) as Array<[ResourceType, number]>;
-    if (r.length !== 1) return false;
-    const [recvType, recvQty] = r[0];
-    if (recvType === ResourceType.Desert || recvQty !== giveQty / 4)
-      return false;
+    if (recvEntries.length !== 1) return false;
+    const [recvType, recvQty] = recvEntries[0];
+    if (recvType === ResourceType.Desert) return false;
+    if (recvQty !== giveQty / 4) return false;
 
     if (!this.hasResources(player, give)) return false;
     if ((bank[recvType] ?? 0) < recvQty) return false;
 
-    // execute
-    for (const [res, qty] of g)
-      player.resources[res] = (player.resources[res] ?? 0) - qty;
-    for (const [res, qty] of g) bank[res] = (bank[res] ?? 0) + qty;
-
+    subBundles(player.resources, give);
+    addBundles(bank, give);
     bank[recvType]! -= recvQty;
     player.resources[recvType] = (player.resources[recvType] ?? 0) + recvQty;
     return true;
