@@ -1,3 +1,15 @@
+// catan-core.ts
+// ------------------------------------------------------------
+// Core engine za Catan logiku (bez UI). Ovde su pravila igre:
+// - bacanje kockica (preko IRandomService)
+// - inicijalno postavljanje naselja sa "snake" redosledom (setup phase)
+// - raspodela resursa po broju žetona
+// - lopov (discard na 7, pomeranje i krađa 1 karte)
+// - plaćena gradnja naselja tokom poteza
+// - trgovina 4:1 sa bankom (ITradingService)
+// - snapshot/import radi localStorage persistence
+// ------------------------------------------------------------
+
 import {
   ResourceType,
   type ResourceBundle,
@@ -11,7 +23,10 @@ import {
 
 import { standard19Tiles, standard19Nodes } from './board-presets';
 
-// ---------- Interfaces (with methods) ----------
+/**
+ * IRandomService — apstrakcija za bacanje dve kockice (2d6).
+ * Vraća i meta-informaciju 'source' (api/local) da UI može da prikaže izvor.
+ */
 export interface IRandomService {
   rollDice(): Promise<{
     dice1: number;
@@ -21,6 +36,11 @@ export interface IRandomService {
   }>;
 }
 
+/**
+ * ITradingService — apstrakcija pravila trgovine
+ * hasResources: čista validacija da li igrač ima dovoljno resursa
+ * tradeWithBank: mutira PlayerState i bank u skladu sa pravilom
+ */
 export interface ITradingService {
   tradeWithBank(
     player: PlayerState,
@@ -32,9 +52,13 @@ export interface ITradingService {
   hasResources(player: PlayerState, bundle: ResourceBundle): boolean;
 }
 
-// ---------- Dice API client implementing IRandomService ----------
+/**
+ * DiceApiRandomService — client za bacanje kockica.
+ * U dev-u koristimo Vite proxy (vite.config.ts) da izbegnemo CORS:
+ *   '/qrand' -> 'https://qrandom.io'
+ * Endpoint ispod koristi taj proxy.
+ */
 export class DiceApiRandomService implements IRandomService {
-  // Use Vite proxy to avoid CORS in dev (vite.config.ts has /qrand proxy)
   private endpoint = '/qrand/api/random/dice?n=2';
 
   async rollDice(): Promise<{
@@ -47,6 +71,8 @@ export class DiceApiRandomService implements IRandomService {
       const res = await fetch(this.endpoint, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Dice API HTTP ${res.status}`);
       const data = (await res.json()) as { dice?: number[] };
+
+      // Očekujemo { dice: [d1, d2] } sa integerima 1..6
       if (!Array.isArray(data.dice) || data.dice.length < 2) {
         throw new Error('Malformed payload (missing dice array).');
       }
@@ -58,6 +84,7 @@ export class DiceApiRandomService implements IRandomService {
       }
       return { dice1, dice2, total: dice1 + dice2, source: 'api' };
     } catch {
+      // Fallback (offline / API ne radi): lokalno bacanje kockica
       const dice1 = 1 + Math.floor(Math.random() * 6);
       const dice2 = 1 + Math.floor(Math.random() * 6);
       return { dice1, dice2, total: dice1 + dice2, source: 'local' };
@@ -65,7 +92,10 @@ export class DiceApiRandomService implements IRandomService {
   }
 }
 
-// ---------- utils ----------
+/**
+ * EMPTY_BUNDLE — helper za kreiranje praznih početnih mapa resursa.
+ * Držimo i Desert: 0 radi uniformnosti sabiranja/oduzimanja (iako se ne koristi kao karta).
+ */
 const EMPTY_BUNDLE = (): ResourceBundle => ({
   [ResourceType.Brick]: 0,
   [ResourceType.Lumber]: 0,
@@ -75,22 +105,28 @@ const EMPTY_BUNDLE = (): ResourceBundle => ({
   [ResourceType.Desert]: 0,
 });
 
+/** addBundles — sabira `delta` u `target` (ignoriše Desert) */
 function addBundles(target: ResourceBundle, delta: ResourceBundle) {
   for (const key of Object.values(ResourceType)) {
     if (key === ResourceType.Desert) continue;
     target[key] = (target[key] ?? 0) + (delta[key] ?? 0);
   }
 }
+
+/** subBundles — oduzima `delta` iz `target` */
 function subBundles(target: ResourceBundle, delta: ResourceBundle) {
   for (const key of Object.values(ResourceType)) {
     if (key === ResourceType.Desert) continue;
     target[key] = (target[key] ?? 0) - (delta[key] ?? 0);
   }
 }
+/** inc — poveća jednu stavku u bundle-u */
 function inc(bundle: ResourceBundle, res: ResourceType, by = 1) {
   if (res === ResourceType.Desert) return;
   bundle[res] = (bundle[res] ?? 0) + by;
 }
+
+/** bundleCount — zbir svih karata */
 function bundleCount(bundle: ResourceBundle): number {
   let sum = 0;
   for (const [k, v] of Object.entries(bundle)) {
@@ -100,7 +136,11 @@ function bundleCount(bundle: ResourceBundle): number {
   return sum;
 }
 
-// ---------- Engine Snapshot ----------
+/**
+ * EngineSnapshot — serializable prikaz engine-a za localStorage.
+ * - Set/Map se prevode u plain array/objekat forme.
+ * - Dovoljno da se kasnije 1:1 obnovi engine preko importState().
+ */
 export type EngineSnapshot = {
   tiles: Tile[];
   bank: ResourceBundle;
@@ -111,33 +151,39 @@ export type EngineSnapshot = {
     settlements: NodeId[];
     victoryPoints: number;
   }>;
-  order: string[];
-  idx: number;
+  order: string[]; // redosled igrača
+  idx: number; // index tekućeg igrača u `order`
   robberOn: TileId;
   turn: number;
   phase: TurnPhase;
   nodeOwnership: Record<NodeId, string | null>;
-  setupRound: number;
-  setupDirection: 1 | -1;
+  setupRound: number; // 1 ili 2
+  setupDirection: 1 | -1; // 1 napred, -1 unazad
 };
 
-// ---------- Core Catan Engine ----------
+/**
+ * CatanEngine - pravila igre.
+ * Interno koristi Map/Set i pomoćne mape za geometriju (čvorovi i veze).
+ * Spolja daje PublicGameView + spec. metode za akcije.
+ */
 export class CatanEngine {
+  // stanje "table" i banke
   private tiles: Tile[];
   private bank: ResourceBundle;
   private players: Map<string, PlayerState>;
 
+  // stanje poteza
   private currentPlayerOrder: string[] = [];
   private currentIdx = 0;
   private robberOn: TileId;
   private turn = 0;
   private phase: TurnPhase = 'setupPlacement';
 
-  // setup placement snake
+  // stanje postavljanja (runda 1 napred, runda 2 nazad)
   private setupRound = 1; // 1 then 2
   private setupDirection: 1 | -1 = 1; // forward then reverse
 
-  // geometry & ownership
+  // geometrija & vlasništvo čvorova
   private nodeOwnership = new Map<NodeId, string | null>();
   private nodeAdjacentTiles = new Map<NodeId, TileId[]>();
   private nodeNeighbors = new Map<NodeId, NodeId[]>();
@@ -145,17 +191,22 @@ export class CatanEngine {
     NodeId,
     { tileId: TileId; cornerIndex: number }
   >();
-  private tileToNodes = new Map<TileId, NodeId[]>();
+  private tileToNodes = new Map<TileId, NodeId[]>(); // obrnuti indeks: pločica -> njena temena
 
   constructor(
-    private readonly rng: IRandomService,
-    private readonly trader: ITradingService,
+    private readonly rng: IRandomService, // izvor bacanja kockica
+    private readonly trader: ITradingService, // 4:1 pravila
     config?: { tiles?: Tile[]; initialBank?: ResourceBundle }
   ) {
+    // pločice: iz config-a ili standardnih 19
     this.tiles = config?.tiles ?? standard19Tiles;
+
+    // lopov se postavlja na pustinji (ako nema, onda prva pločica)
     this.robberOn =
       this.tiles.find((t) => t.resource === ResourceType.Desert)?.id ??
       this.tiles[0].id;
+
+    // inicijalna banka (osnovna igra ima po 19 za svaku kartu resursa)
     this.bank = config?.initialBank ?? {
       [ResourceType.Brick]: 19,
       [ResourceType.Lumber]: 19,
@@ -166,7 +217,7 @@ export class CatanEngine {
     };
     this.players = new Map();
 
-    // seed geometry
+    // --- seeding geometrije iz standard19Nodes ---
     for (const n of standard19Nodes) {
       this.nodeOwnership.set(n.id, null);
       this.nodeAdjacentTiles.set(n.id, [...n.adjacentTiles]);
@@ -176,7 +227,8 @@ export class CatanEngine {
         cornerIndex: n.cornerIndex,
       });
     }
-    // reverse index: tile -> nodes touching it
+
+    // obrnuti indeks: za svaku pločicu znamo koja temena je dodiruju
     for (const [nodeId, tiles] of this.nodeAdjacentTiles.entries()) {
       for (const tid of tiles) {
         if (!this.tileToNodes.has(tid)) this.tileToNodes.set(tid, []);
@@ -186,6 +238,11 @@ export class CatanEngine {
   }
 
   // ----- lifecycle -----
+
+  /**
+   * addPlayer — ubacuje novog igrača. ID mora biti jedinstven.
+   * Puni resurse praznim bundle-om; VP = 0; skup naselja prazan.
+   */
   addPlayer(id: string, name: string) {
     if (this.players.has(id)) throw new Error('Player id exists.');
     this.players.set(id, {
@@ -195,15 +252,21 @@ export class CatanEngine {
       settlements: new Set<NodeId>(),
       victoryPoints: 0,
     });
+    // svaki put kad se izmeni skup igrača, regeneriši redosled
     this.currentPlayerOrder = Array.from(this.players.keys());
   }
 
+  /**
+   * startGame — validira da imamo >=2 igrača
+   * Setup kreće u 'setupPlacement'
+   */
   startGame(firstPlayerId?: string) {
     if (this.players.size < 2) throw new Error('Need at least 2 players.');
     if (firstPlayerId && !this.players.has(firstPlayerId)) {
       throw new Error('Unknown first player.');
     }
 
+    // ako je zadat prvi igrač -> rotiraj redosled da on počinje
     if (firstPlayerId) {
       const order = Array.from(this.players.keys());
       const idx = order.indexOf(firstPlayerId);
@@ -217,13 +280,18 @@ export class CatanEngine {
     this.setupDirection = 1;
   }
 
+  /** currentPlayer — helper za lak pristup igracu na potezu */
   get currentPlayer(): PlayerState | null {
     if (this.currentPlayerOrder.length === 0) return null;
     const id = this.currentPlayerOrder[this.currentIdx];
     return this.players.get(id) ?? null;
   }
 
-  // ----- setup placement -----
+  /**
+   * getAvailableSettlementSpots — računa sva legalna temena za naselje
+   * tokom setup-a (i kasnije UI može da ih highlight-uje).
+   * Pravilo razdaljine: nijedan susedni node ne sme biti zauzet.
+   */
   getAvailableSettlementSpots(): NodeId[] {
     const spots: NodeId[] = [];
     for (const [nid, owner] of this.nodeOwnership.entries()) {
@@ -239,24 +307,31 @@ export class CatanEngine {
     return spots;
   }
 
+  /**
+   * placeInitialSettlement — postavljanje naselja u setup fazi.
+   * - Validira fazu, vlasništvo i pravilo razdaljine.
+   * - Upisuje vlasništvo i +1 VP.
+   * - Pomera redosled i po završetku 2. runde prelazi u awaitingRoll.
+   */
   placeInitialSettlement(playerId: string, nodeId: NodeId) {
     if (this.phase !== 'setupPlacement') throw new Error('Not in setup phase.');
     const p = this.players.get(playerId);
     if (!p) throw new Error('Unknown player.');
     if ((this.nodeOwnership.get(nodeId) ?? null) !== null)
       throw new Error('Spot occupied.');
-    // enforce distance rule
+
+    // pravilo razdaljine: nijedan susedni node ne sme biti zauzet
     const neighbors = this.nodeNeighbors.get(nodeId) ?? [];
     if (neighbors.some((n) => (this.nodeOwnership.get(n) ?? null) !== null)) {
       throw new Error('Too close to another settlement.');
     }
 
-    // place
+    // upiši vlasništvo + VP
     this.nodeOwnership.set(nodeId, playerId);
     p.settlements.add(nodeId);
     p.victoryPoints += 1;
 
-    // advance snake order
+    // "zmijica" (r1 napred, r2 nazad), pa prelazak u normalne poteze
     const lastIndex = this.currentPlayerOrder.length - 1;
     if (this.setupRound === 1) {
       if (this.currentIdx === lastIndex) {
@@ -266,10 +341,9 @@ export class CatanEngine {
         this.currentIdx++;
       }
     } else {
-      // round 2
+      // runda 2 (nazad)
       if (this.currentIdx === 0) {
-        // setup complete -> start normal turns from player 0
-        this.phase = 'awaitingRoll';
+        this.phase = 'awaitingRoll'; // runda 2 (nazad)
         this.currentIdx = 0;
       } else {
         this.currentIdx--;
@@ -277,7 +351,12 @@ export class CatanEngine {
     }
   }
 
-  // ----- gameplay flow -----
+  /**
+   * rollAndDistribute — baca kockice i odmah vraća "per-player" delte:
+   * - ako je 7 → handleRobberSeven() vraća discards po igračima; faza => awaitingRobberMove
+   * - inače → distributeFor(n) vraća gains po igračima; faza => awaitingActions
+   * UI to koristi da odmah prikaže +1/-1 pored resursa.
+   */
   async rollAndDistribute(): Promise<{
     dice1: number;
     dice2: number;
@@ -290,7 +369,7 @@ export class CatanEngine {
     const roll = await this.rng.rollDice();
 
     if (roll.total === 7) {
-      // collect who discarded what
+      // svi sa >=8 karata odbacuju polovinu (zaokruženo nadole)
       const discards = this.handleRobberSeven();
       this.phase = 'awaitingRobberMove';
       return {
@@ -301,7 +380,8 @@ export class CatanEngine {
         discards: Object.fromEntries(discards.entries()),
       };
     } else {
-      const gains = this.distributeFor(roll.total); // per-player resource gains
+      // raspodela resursa
+      const gains = this.distributeFor(roll.total);
       this.phase = 'awaitingActions';
       return {
         dice1: roll.dice1,
@@ -313,6 +393,10 @@ export class CatanEngine {
     }
   }
 
+  /**
+   * nextPlayer — završava potez, ide na sledećeg, i prelazi u awaitingRoll.
+   * Dozvoljeno samo u 'awaitingActions' (posle roll-a/robbera).
+   */
   nextPlayer() {
     if (this.phase !== 'awaitingActions')
       throw new Error('Finish actions first.');
@@ -321,6 +405,10 @@ export class CatanEngine {
     this.phase = 'awaitingRoll';
   }
 
+  /**
+   * moveRobber — pomera lopova na zadatu pločicu.
+   * Ako smo bili u 'awaitingRobberMove', prelazimo u 'awaitingActions'.
+   */
   moveRobber(
     toTile: TileId,
     stealFromPlayerId?: string
@@ -335,6 +423,7 @@ export class CatanEngine {
       const victim = this.players.get(stealFromPlayerId);
       const thief = this.currentPlayer;
       if (victim && thief) {
+        // napravi multiset žrtvinih karata pa odaberi nasumičnu
         const victimCards: Array<ResourceType> = [];
         for (const [res, qty] of Object.entries(victim.resources) as Array<
           [ResourceType, number]
@@ -355,7 +444,11 @@ export class CatanEngine {
     if (wasAwaitingRobber) this.phase = 'awaitingActions';
   }
 
-  // ----- internals producing per-player deltas -----
+  /**
+   * distributeFor(n) — iterira pločice sa brojem n gde ne stoji lopov,
+   * potom za svako teme uz te pločice dodeljuje +1 resurs vlasniku (naselja).
+   * Vraća Map<playerId, ResourceBundle> za UI overlay (+1/+2 ...).
+   */
   private distributeFor(numberToken: number): Map<string, ResourceBundle> {
     const perPlayer = new Map<string, ResourceBundle>();
 
@@ -370,7 +463,7 @@ export class CatanEngine {
         if (!ownerId) continue;
         const player = this.players.get(ownerId)!;
 
-        const gain = 1; // settlements only (cities removed from your brief)
+        const gain = 1; // samo naselja (gradovi uklonjeni iz scope-a)
         const available = this.bank[tile.resource] ?? 0;
         if (available <= 0) continue;
 
@@ -387,6 +480,10 @@ export class CatanEngine {
     return perPlayer;
   }
 
+  /**
+   * handleRobberSeven — svi sa >=8 karata odbacuju floor(total/2).
+   * Vraća Map<playerId, ResourceBundle> šta je ko izgubio (za -x overlay).
+   */
   private handleRobberSeven(): Map<string, ResourceBundle> {
     const perPlayerLosses = new Map<string, ResourceBundle>();
     for (const p of this.players.values()) {
@@ -400,6 +497,10 @@ export class CatanEngine {
     return perPlayerLosses;
   }
 
+  /**
+   * discardEvenly — kružno odbacivanje po vrstama resursa dok ne odbacimo `toDiscard`.
+   * Istovremeno vraća bundle onoga što je konkretan igrač izgubio (za UI).
+   */
   private discardEvenly(p: PlayerState, toDiscard: number): ResourceBundle {
     const order: (keyof ResourceBundle)[] = [
       ResourceType.Brick,
@@ -426,14 +527,18 @@ export class CatanEngine {
     return lost;
   }
 
-  // ----- building settlements (paid during actions) -----
+  /**
+   * buildSettlementAt — plaćena gradnja naselja tokom poteza.
+   * Validira fazu, prazno teme i pravilo razdaljine, traži 1:1:1:1 (Brick,Lumber,Wool,Grain).
+   * Ako prođe validaciju: troši resurse, vraća ih u banku i upisuje vlasništvo + VP.
+   */
   buildSettlementAt(playerId: string, nodeId: NodeId): boolean {
     if (this.phase !== 'awaitingActions') throw new Error('Cannot build now.');
     const p = this.players.get(playerId);
     if (!p) return false;
     if ((this.nodeOwnership.get(nodeId) ?? null) !== null) return false;
 
-    // distance rule
+    // pravilo razdaljine
     const neighbors = this.nodeNeighbors.get(nodeId) ?? [];
     if (neighbors.some((n) => (this.nodeOwnership.get(n) ?? null) !== null))
       return false;
@@ -455,6 +560,9 @@ export class CatanEngine {
     return true;
   }
 
+  /**
+   * maritimeTrade — proxy ka ITradingService
+   */
   maritimeTrade(
     playerId: string,
     give: ResourceBundle,
@@ -465,7 +573,10 @@ export class CatanEngine {
     return this.trader.tradeWithBank(p, this.bank, give, receive);
   }
 
-  // ----- info -----
+  /**
+   * getPublicState — sklapa PublicGameView iz internih Map/Set struktura.
+   * UI koristi isključivo ovo da crta tablu i prikazuje osnovne podatke.
+   */
   getPublicState(): PublicGameView {
     const nodeOwnership: Record<NodeId, string | null> = {};
     const nodeAdjacentTiles: Record<NodeId, TileId[]> = {};
@@ -500,11 +611,16 @@ export class CatanEngine {
     };
   }
 
+  /** getPlayerResources — kopija resursa za PlayerCard/UI. */
   getPlayerResources(playerId: string): ResourceBundle {
     const p = this.players.get(playerId);
     return p ? { ...p.resources } : {};
   }
 
+  /**
+   * exportState — pravi EngineSnapshot (JSON-serializable) za localStorage.
+   * Konvertuje Set/Map u plain forme.
+   */
   exportState(): EngineSnapshot {
     const players = Array.from(this.players.values()).map((p) => ({
       id: p.id,
@@ -534,6 +650,9 @@ export class CatanEngine {
     };
   }
 
+  /**
+   * importState — rekonstruiše engine iz prethodnog snapshot-a.
+   */
   static importState(
     snapshot: EngineSnapshot,
     rng: IRandomService,
@@ -577,7 +696,9 @@ export class CatanEngine {
   }
 }
 
-// ---------- Trading 4:1 ----------
+/**
+ * FourToOneTradingService — daš 4 iste karte, dobiješ 1 traženu (ako ih banka ima)
+ */
 export class FourToOneTradingService implements ITradingService {
   hasResources(player: PlayerState, bundle: ResourceBundle): boolean {
     for (const [res, qty] of Object.entries(bundle) as Array<
@@ -594,6 +715,7 @@ export class FourToOneTradingService implements ITradingService {
     give: ResourceBundle,
     receive: ResourceBundle
   ): boolean {
+    // Provera: moraš davati samo JEDNU vrstu resursa (>0)
     const entries = Object.entries(give).filter(
       ([_, v]) => (v ?? 0) > 0
     ) as Array<[ResourceType, number]>;
@@ -603,6 +725,7 @@ export class FourToOneTradingService implements ITradingService {
     if (giveType === ResourceType.Desert) return false;
     if (giveQty % 4 !== 0) return false;
 
+    // Provera: primaš samo JEDNU vrstu resursa, u količini giveQty/4
     const recvEntries = Object.entries(receive).filter(
       ([_, v]) => (v ?? 0) > 0
     ) as Array<[ResourceType, number]>;
@@ -611,9 +734,11 @@ export class FourToOneTradingService implements ITradingService {
     if (recvType === ResourceType.Desert) return false;
     if (recvQty !== giveQty / 4) return false;
 
+    // Validiraj da igrač ima, a banka može da isporuči
     if (!this.hasResources(player, give)) return false;
     if ((bank[recvType] ?? 0) < recvQty) return false;
 
+    // Mutacije: uzmi od igrača, dodaj u banku; uzmi iz banke, daj igraču
     subBundles(player.resources, give);
     addBundles(bank, give);
     bank[recvType]! -= recvQty;

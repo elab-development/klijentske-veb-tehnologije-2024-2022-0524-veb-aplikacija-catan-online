@@ -1,18 +1,35 @@
+// Game.tsx
+// -----------------------------------------------------------------------------
+// Glavna stranica "Game":
+// - Orkestrira stanje preko Zustand store-a (useGameStore).
+// - Rukuje inicijalizacijom igre, dodavanjem igrača, startovanjem,
+//   bacanjem kockica, prelaskom poteza, postavljanjem naselja (setup + akcije),
+//   kao i radom sa lokalnim snimanjem (Continue / Clear Save).
+// - Prikazuje tablu (CatanBoard), traku sa informacijama (turn, phase, last roll),
+//   listu igrača sa resursima i deltama (+/-), banku i log poruke.
+// -----------------------------------------------------------------------------
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
 import CatanBoard from '../game/ui/CatanBoard';
 import type { NodeId, TileId, ResourceBundle } from '../game/catan-core-types';
 
 export default function Game() {
+  //-----------------------------------------------------------------------
+  // Selektovanje delova stanja iz Zustand-a. Svaki selektor menja komponentu
+  // samo kada se ta vrednost promeni. Ovo je efikasnije nego (s) => s
+  // jer izbegavamo re-render-e na svaku promenu nebitnog dela store-a.
+  // ---------------------------------------------------------------------------
   const view = useGameStore((s) => s.view);
   const started = useGameStore((s) => s.started);
   const lastRoll = useGameStore((s) => s.lastRoll);
   const messages = useGameStore((s) => s.messages);
-  const lastGains = useGameStore((s) => s.lastGains);
-  const lastLosses = useGameStore((s) => s.lastLosses);
-  const resVersion = useGameStore((s) => s.resVersion);
-  const hasSaved = useGameStore((s) => s.hasSaved);
+  const lastGains = useGameStore((s) => s.lastGains); // per-turn +deltas po igraču
+  const lastLosses = useGameStore((s) => s.lastLosses); // per-turn -deltas po igraču
+  const resVersion = useGameStore((s) => s.resVersion); // bump za force re-calc resursa
+  const hasSaved = useGameStore((s) => s.hasSaved); // da li postoji save u localStorage
 
+  // Akcije iz store-a: inicijalizacija, reset, upravljanje igračima i potezima itd.
   const init = useGameStore((s) => s.init);
   const reset = useGameStore((s) => s.reset);
   const addPlayer = useGameStore((s) => s.addPlayer);
@@ -28,13 +45,23 @@ export default function Game() {
     (s) => s.getAvailableSettlementSpots
   );
   const checkSaved = useGameStore((s) => s.checkSaved);
+
+  // Stabilna referenca na funkciju koja vraća resurse igrača u trenutnom engine-u.
+  // useRef čuva istu referencu kroz render-e (ne menja se).
   const getPlayerResourcesFn = useRef(
     useGameStore.getState().getPlayerResources
   );
 
-  const [name, setName] = useState('');
-  const [availableSpots, setAvailableSpots] = useState<NodeId[]>([]);
+  // Lokalne UI state promenljive
+  const [name, setName] = useState(''); // input za dodavanje igrača
+  const [availableSpots, setAvailableSpots] = useState<NodeId[]>([]); // highlight čvorova
 
+  // ---------------------------------------------------------------------------
+  // Jednokratna inicijalizacija:
+  // - checkSaved() da saznamo da li u localStorage postoji sačuvana igra (za Continue).
+  // - init() da pokrenemo engine (random board uz drand seed ili fallback).
+  // didInit ref služi da spreči ponovnu init logiku ako se ovaj effect ponovo pozove
+  // ---------------------------------------------------------------------------
   const didInit = useRef(false);
   useEffect(() => {
     if (didInit.current) return;
@@ -43,6 +70,11 @@ export default function Game() {
     init();
   }, [init, checkSaved]);
 
+  // ---------------------------------------------------------------------------
+  // Kad god se stanje relevantno promeni (faza, current player, ownership itd.),
+  // izračunamo legalne čvorove za postavljanje naselja (setup & akcije).
+  // Ako igra nije startovana ili ne postoji view, praznimo listu.
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (started && view) setAvailableSpots(getAvailableSettlementSpots());
     else setAvailableSpots([]);
@@ -59,13 +91,14 @@ export default function Game() {
     getAvailableSettlementSpots,
   ]);
 
-  const canStart = (view?.players.length ?? 0) >= 2;
+  const canStart = (view?.players.length ?? 0) >= 2; // minimalno 2 igrača
   const phase = view?.phase ?? 'setupPlacement';
-  const inSetup = phase === 'setupPlacement';
-  const canRoll = phase === 'awaitingRoll';
-  const canAct = phase === 'awaitingActions';
-  const needsRobber = phase === 'awaitingRobberMove';
+  const inSetup = phase === 'setupPlacement'; // početna snake postavka
+  const canRoll = phase === 'awaitingRoll'; // bacanje kockica dozvoljeno
+  const canAct = phase === 'awaitingActions'; // posle roll-a (≠7)
+  const needsRobber = phase === 'awaitingRobberMove'; // posle roll=7
 
+  // Trenutni igrač (po id-u iz view.currentPlayerId)
   const currentPlayer = useMemo(() => {
     if (!view) return null;
     return view.players.find((p) => p.id === view.currentPlayerId) ?? null;
@@ -81,7 +114,13 @@ export default function Game() {
         </p>
       </div>
 
-      {/* Setup controls */}
+      {/* -----------------------------------------------------------------------
+         PRE-GAME (setup) panel:
+         - Dodavanje igrača (input + Add player)
+         - Start game dugme (disabled dok nema >= 2 igrača)
+         - Ako postoji local save: Continue i Clear Save dugmad
+         - Reset uvek dostupan (resetuje aktuelni session i briše save)
+      ----------------------------------------------------------------------- */}
       {!started && (
         <div className='mx-auto max-w-6xl px-4 py-3'>
           <div className='flex flex-col gap-3 rounded-xl bg-white/5 p-4'>
@@ -104,6 +143,7 @@ export default function Game() {
               </button>
             </div>
 
+            {/* Prikaz trenutne liste igrača (imena) */}
             <div className='text-sm text-white/80'>
               Current players:{' '}
               {view?.players.length
@@ -111,6 +151,7 @@ export default function Game() {
                 : '—'}
             </div>
 
+            {/* Kontrole za start/continue/clear/reset */}
             <div className='flex items-center gap-2'>
               <button
                 disabled={!canStart}
@@ -154,10 +195,18 @@ export default function Game() {
         </div>
       )}
 
-      {/* In-game panel */}
+      {/* -----------------------------------------------------------------------
+         IN-GAME panel:
+         - Top info bar (Turn, Current Player, Phase, Last Roll)
+         - CatanBoard (SVG tabla) sa highlight-ovanim legalnim čvorovima
+         - Actions: Roll / Next Player (zavisno od faze)
+         - Lista igrača + resursi (sa +/− deltama nakon roll/robber)
+         - Bank prikaz
+         - Log (istorija poruka)
+      ----------------------------------------------------------------------- */}
       {started && view && (
         <div className='mx-auto max-w-6xl px-4 pb-8'>
-          {/* Top bar */}
+          {/* Gornja info traka */}
           <div className='mb-4 grid grid-cols-1 gap-3 md:grid-cols-4'>
             <InfoCard label='Turn' value={String(view.turn)} strong />
             <InfoCard
@@ -176,7 +225,8 @@ export default function Game() {
             />
           </div>
 
-          {/* Board */}
+          {/* Tabla (SVG). Klik na node: setup→placeInitial, actions→buildSettlement.
+             Klik na tile: samo kada treba pomeriti lopova (needsRobber). */}
           <div className='mb-6'>
             <CatanBoard
               view={view}
@@ -194,7 +244,7 @@ export default function Game() {
             />
           </div>
 
-          {/* Actions */}
+          {/* Akcije poteza – roll (samo na početku poteza) i end turn (posle akcija) */}
           <div className='mb-6 flex flex-wrap items-center gap-2'>
             <button
               onClick={roll}
@@ -227,7 +277,8 @@ export default function Game() {
             </button>
           </div>
 
-          {/* Players + resources with deltas */}
+          {/* Igrači + resursi sa prikazom +/− delti nakon roll-a/robbera.
+             resVersion je "bump" koji tera PlayerCard da recompute-uje resurse odmah. */}
           <div className='mb-6'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Players</h2>
             <div className='grid grid-cols-1 gap-3 md:grid-cols-2'>
@@ -237,7 +288,7 @@ export default function Game() {
                   playerId={p.id}
                   name={p.name}
                   victoryPoints={p.victoryPoints}
-                  resVersion={resVersion} // recompute immediately after roll/robber
+                  resVersion={resVersion} // recompute odmah posle promene
                   getRes={getPlayerResourcesFn}
                   gains={lastGains[p.id] ?? {}}
                   losses={lastLosses[p.id] ?? {}}
@@ -246,7 +297,7 @@ export default function Game() {
             </div>
           </div>
 
-          {/* Bank */}
+          {/* Bank - resursi koji su ostali u banci */}
           <div className='mb-6 rounded-xl bg-white/5 p-4'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Bank</h2>
             <KeyValueRow label='Brick' value={view.bank.Brick ?? 0} />
@@ -256,7 +307,7 @@ export default function Game() {
             <KeyValueRow label='Ore' value={view.bank.Ore ?? 0} />
           </div>
 
-          {/* Log */}
+          {/* Log - istorija poruka iz store-a */}
           <div className='rounded-xl bg-white/5 p-4'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Log</h2>
             <ul className='list-disc pl-5 text-white/80'>
@@ -271,6 +322,9 @@ export default function Game() {
   );
 }
 
+// -----------------------------------------------------------------------------
+// InfoCard – mali info blok (label + value), koristi se u gornjoj traci.
+// -----------------------------------------------------------------------------
 function InfoCard({
   label,
   value,
@@ -290,6 +344,7 @@ function InfoCard({
   );
 }
 
+// Jednostavan red "label: value" – koristi se za banku
 function KeyValueRow({ label, value }: { label: string; value: number }) {
   return (
     <div className='flex items-center justify-between border-b border-white/10 py-1 text-white/80'>
@@ -299,6 +354,12 @@ function KeyValueRow({ label, value }: { label: string; value: number }) {
   );
 }
 
+// -----------------------------------------------------------------------------
+// PlayerCard – prikaz pojedinačnog igrača:
+// - Ime, VP
+// - Resursi iz engine-a (getRes.current(playerId)) – "resVersion" kao dep.
+// - Prikaz +/− delti (gains/losses) pored svake vrste resursa.
+// -----------------------------------------------------------------------------
 function PlayerCard({
   playerId,
   name,
@@ -311,15 +372,19 @@ function PlayerCard({
   playerId: string;
   name: string;
   victoryPoints: number;
-  resVersion: number;
+  resVersion: number; // bump za preračun
   getRes: React.MutableRefObject<(pid: string) => any>;
-  gains: ResourceBundle;
-  losses: ResourceBundle;
+  gains: ResourceBundle; // +deltas za ovaj turn
+  losses: ResourceBundle; // -deltas za ovaj turn
 }) {
+  // Kad se promeni resVersion ili playerId (ili referenca getRes),
+  // ponovo čitamo aktuelne resurse iz engine-a (read-only snapshot).
   const res = useMemo(
     () => getRes.current(playerId),
     [playerId, resVersion, getRes]
   );
+
+  // Redosled prikaza resursa
   const rows = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'] as const;
 
   return (
@@ -330,6 +395,7 @@ function PlayerCard({
       </div>
       <div className='mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2'>
         {rows.map((r) => {
+          // Trenutna količina i delte iz store-a
           const base = (res as any)[r] ?? 0;
           const plus = (gains as any)[r] ?? 0;
           const minus = (losses as any)[r] ?? 0;

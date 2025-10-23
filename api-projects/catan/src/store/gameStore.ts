@@ -1,3 +1,13 @@
+// gameStore.ts
+// ---------------------------------------------------------------------
+// Zustand store = "global" stanje igre.
+// - Drži CatanEngine instancu i PublicGameView (za UI render).
+// - Omogućava lifecycle operacije (init/reset/addPlayer/startGame).
+// - Sadrži game flow akcije (roll/nextPlayer/moveRobber/...).
+// - Čuva per-turn delte (lastGains/lastLosses) da UI prikaže +1 / -1 overlay.
+// - Persistence: snima EngineSnapshot + UI meta u localStorage i nudi Continue.
+// ---------------------------------------------------------------------
+
 import { create } from 'zustand';
 import {
   CatanEngine,
@@ -16,52 +26,58 @@ import type {
 import { randomizedStandard19Tiles } from '../game/board-presets';
 import { fetchDrandSeed32 } from '../game/random-seed';
 
+// Info o poslednjem bacanju (za UI header)
 type RollInfo = { total: number; source: 'api' | 'local' };
-type DeltaMap = Record<string, ResourceBundle>; // playerId -> bundle
+// DeltaMap: per-player bundle (npr. { playerId: { Brick: +1, Grain: +2 } })
+type DeltaMap = Record<string, ResourceBundle>;
 
+// ključ u localStorage-u
 const SAVE_KEY = 'catan-save-v1';
 
+// Centralni tip Zustand store-a
 type GameState = {
-  engine: CatanEngine | null;
-  view: PublicGameView | null;
-  started: boolean;
-  lastRoll: RollInfo | null;
-  messages: string[];
+  engine: CatanEngine | null; // core engine (pravila)
+  view: PublicGameView | null; // core engine (pravila)
+  started: boolean; // da li je igra startovana (posle setupa igrača)
+  lastRoll: RollInfo | null; // info o poslednjem roll-u
+  messages: string[]; // log poruke
 
-  // NEW: per-turn delta overlays and a version to force resource re-render
-  lastGains: DeltaMap;
-  lastLosses: DeltaMap;
-  resVersion: number;
+  // per-turn delta overlays (UI prikazuje +1/-1 pored resursa)
+  lastGains: DeltaMap; // ko je šta dobio na ovom roll-u
+  lastLosses: DeltaMap; // ko je šta izgubio (7/discard ili theft)
+  resVersion: number; // samo brojač da natera re-render PlayerCard resursa
 
   hasSaved: boolean;
 
   // lifecycle
-  init(): void;
-  reset(): void;
-  addPlayer(name: string): void;
-  startGame(firstPlayerId?: string): void;
+  init(): void; // kreira engine i tablu (random preko drand seed-a)
+  reset(): void; // potpuno resetuje igru (i briše save)
+  addPlayer(name: string): void; // dodaje igrača (dok nije startovano)
+  startGame(firstPlayerId?: string): void; // prelaz u setup fazu
 
   // save/continue
-  checkSaved(): void;
-  continueSaved(): void;
-  clearSaved(): void;
+  checkSaved(): void; // proveri ima li save (UI: pokaži "Continue")
+  continueSaved(): void; // učitaj i nastavi iz save-a
+  clearSaved(): void; // opcija da se očisti save
 
   // placement
-  getAvailableSettlementSpots(): NodeId[];
-  placeInitialSettlement(nodeId: NodeId): void;
+  getAvailableSettlementSpots(): NodeId[]; // legalni čvorovi za naselje
+  placeInitialSettlement(nodeId: NodeId): void; // klik na node tokom setup-a
 
   // gameplay
-  roll(): Promise<void>;
-  nextPlayer(): void;
-  moveRobber(tileId: string, stealFromPlayerId?: string): void;
-  buildSettlementAt(playerId: string, nodeId: NodeId): void;
+  roll(): Promise<void>; // bacanje kockica
+  nextPlayer(): void; // kraj poteza
+  moveRobber(tileId: string, stealFromPlayerId?: string): void; // pomeri lopova
+  buildSettlementAt(playerId: string, nodeId: NodeId): void; // gradnja naselja
 
   // info
   getPlayerResources(playerId: string): ResourceBundle;
 };
 
+// helper da napravimo "prazne" delte
 const emptyDelta = (): DeltaMap => ({});
 
+// helper za čitanje JSON-a iz localStorage-a
 function loadFromStorage<T>(key: string): T | null {
   try {
     const raw = localStorage.getItem(key);
@@ -72,7 +88,9 @@ function loadFromStorage<T>(key: string): T | null {
   }
 }
 
+// Glavni Zustand store
 export const useGameStore = create<GameState>((set, get) => ({
+  // ---- osnovno stanje ----
   engine: null,
   view: null,
   started: false,
@@ -85,8 +103,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   hasSaved: false,
 
   // ---- persistence helpers (internal) ----
-  // call this after any mutation to persist
-  // (we keep it declared inline so it can access get/set)
+  // privatna funkcija (ostaje unutar store-a) koja upisuje sve u localStorage.
+  // Pozivamo je posle svih mutacija da sačuvamo progres
   // @ts-ignore - keep local to store
   _saveNow: () => {
     const { engine, started, lastRoll, messages, lastGains, lastLosses } =
@@ -104,16 +122,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
       set({ hasSaved: true });
-    } catch {
-      // ignore quota errors
-    }
+    } catch {}
   },
 
+  // samo setuje flag hasSaved na osnovu postojanja ključa
   checkSaved() {
     const has = !!loadFromStorage(SAVE_KEY);
     set({ hasSaved: has });
   },
 
+  // učitaj iz localStorage-a i rekonstruiši engine preko importState()
   continueSaved() {
     const data = loadFromStorage<{
       snapshot: EngineSnapshot;
@@ -125,6 +143,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     }>(SAVE_KEY);
     if (!data) return;
 
+    // moramo ponovo obezbediti servise (dice + trading)
     const rng: IRandomService = new DiceApiRandomService();
     const trader: ITradingService = new FourToOneTradingService();
     const engine = CatanEngine.importState(data.snapshot, rng, trader);
@@ -137,11 +156,12 @@ export const useGameStore = create<GameState>((set, get) => ({
       messages: data.messages ?? [],
       lastGains: data.lastGains ?? emptyDelta(),
       lastLosses: data.lastLosses ?? emptyDelta(),
-      resVersion: get().resVersion + 1,
+      resVersion: get().resVersion + 1, // nateraj PlayerCard da pročita nove resurse
       hasSaved: true,
     });
   },
 
+  // brisanje save-a iz UI-a
   clearSaved() {
     try {
       localStorage.removeItem(SAVE_KEY);
@@ -149,7 +169,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({ hasSaved: false });
   },
 
-  // fire-and-forget init: fetch drand seed and build randomized tiles
+  // init: asinhrono — dovlači drand seed, generiše random tablu, pravi engine.
+  // U fallback-u (ako drand padne) koristi standardnu determinističku tablu.
   init() {
     (async () => {
       try {
@@ -171,6 +192,7 @@ export const useGameStore = create<GameState>((set, get) => ({
           hasSaved: has,
         });
       } catch {
+        // fallback: nema drand/greška — koristi standardnu tablu
         const has = !!loadFromStorage(SAVE_KEY);
         const rng: IRandomService = new DiceApiRandomService();
         const trader: ITradingService = new FourToOneTradingService();
@@ -190,6 +212,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     })();
   },
 
+  // resetuje sve; ponovo poziva init(); briše save
   reset() {
     get().init();
     set((s) => ({ messages: [...s.messages, 'Game reset.'] }));
@@ -199,6 +222,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({ hasSaved: false });
   },
 
+  // dodaj igrača. Koristimo crypto.randomUUID() za identifikatore
   addPlayer(name: string) {
     const { engine } = get();
     if (!engine) return;
@@ -210,6 +234,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     (get() as any)._saveNow();
   },
 
+  // startGame postavlja setup fazu i šalje info poruku.
   startGame(firstPlayerId) {
     const { engine } = get();
     if (!engine) return;
@@ -235,6 +260,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     return engine.getAvailableSettlementSpots();
   },
 
+  // klik na node tokom setup-a
   placeInitialSettlement(nodeId) {
     const { engine } = get();
     if (!engine) return;
@@ -247,7 +273,7 @@ export const useGameStore = create<GameState>((set, get) => ({
           ...get().messages,
           `Placed initial settlement on ${nodeId}.`,
         ],
-        // no deltas during setup
+        // tokom setup-a nema delta overlay-a (dobitak tek na prvi roll)
         resVersion: get().resVersion + 1,
       });
       (get() as any)._saveNow();
@@ -259,16 +285,19 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   // ----- Gameplay -----
+
+  // roll: čisti stare delte, zove engine.rollAndDistribute(),
+  // update-uje view + lastGains/lastLosses tako da UI prikaže odmah +x/-x.
   async roll() {
     const { engine } = get();
     if (!engine) return;
     try {
-      // clear old overlays for this new roll
+      // novi roll ⇒ očisti prethodne overlay-e
       set({ lastGains: emptyDelta(), lastLosses: emptyDelta() });
 
       const res = await engine.rollAndDistribute();
 
-      // convert optional maps coming back
+      // engine vraća opcione map-e: gains ili discards (za 7)
       const gains = (res as any).gains ?? {};
       const discards = (res as any).discards ?? {};
 
@@ -283,8 +312,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         view: engine.getPublicState(),
         messages: [...get().messages, baseMsg],
         lastGains: gains,
-        lastLosses: discards, // when 7, show immediate losses
-        resVersion: get().resVersion + 1, // force PlayerCard to recompute resources now
+        lastLosses: discards, // kod 7 odmah pokaži šta je ko odbacio
+        resVersion: get().resVersion + 1, // nateraj PlayerCard da pročita nova stanja
       });
       (get() as any)._saveNow();
     } catch (e: any) {
@@ -294,6 +323,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
+  // Next Player: završava potez (dozvoljeno samo u awaitingActions).
+  // lastGains/lastLosses ostaju vidljivi do sledećeg roll-a.
   nextPlayer() {
     const { engine } = get();
     if (!engine) return;
@@ -302,7 +333,6 @@ export const useGameStore = create<GameState>((set, get) => ({
       set({
         view: engine.getPublicState(),
         messages: [...get().messages, 'Next player.'],
-        // keep lastGains/lastLosses visible until next roll; do NOT clear
         resVersion: get().resVersion + 1,
       });
       (get() as any)._saveNow();
@@ -313,6 +343,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
+  // Pomeri lopova; opcionalno ukradi 1 nasumičnu kartu victim-u.
+  // Ako je došlo do krađe, overlay-uj +1 za kradljivca i -1 za žrtvu.
   moveRobber(tileId, stealFromPlayerId) {
     const { engine } = get();
     if (!engine) return;
@@ -325,14 +357,15 @@ export const useGameStore = create<GameState>((set, get) => ({
       let updatedGains = { ...get().lastGains };
       let updatedLosses = { ...get().lastLosses };
 
-      // If a steal occurred, overlay +1 / -1 deltas
       if (result && (result as any).theft) {
         const { from, to, resource } = (result as any).theft!;
+        // +1 za lopova
         updatedGains[to] = {
           ...(updatedGains[to] ?? {}),
           [resource as ResourceType]:
             (updatedGains[to]?.[resource as ResourceType] ?? 0) + 1,
         };
+        // -1 (kao "loss") za žrtvu — prikazujemo u lastLosses
         updatedLosses[from] = {
           ...(updatedLosses[from] ?? {}),
           [resource as ResourceType]:
@@ -363,6 +396,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
+  // Plaćena gradnja naselja tokom poteza (awaitingActions).
   buildSettlementAt(playerId, nodeId) {
     const { engine } = get();
     if (!engine) return;
@@ -387,6 +421,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   // ----- Info -----
+
+  // PlayerCard koristi ovo da dobije "snapshot" resursa igrača.
   getPlayerResources(playerId) {
     const { engine } = get();
     return engine ? engine.getPlayerResources(playerId) : {};
