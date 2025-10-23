@@ -13,7 +13,6 @@ import { standard19Tiles, standard19Nodes } from './board-presets';
 
 // ---------- Interfaces (with methods) ----------
 export interface IRandomService {
-  /** Roll two six-sided dice; return both dice and the total. */
   rollDice(): Promise<{
     dice1: number;
     dice2: number;
@@ -22,7 +21,6 @@ export interface IRandomService {
   }>;
 }
 
-/** Trading rules abstraction (so you can swap 4:1 rules, harbor variants later). */
 export interface ITradingService {
   tradeWithBank(
     player: PlayerState,
@@ -36,7 +34,7 @@ export interface ITradingService {
 
 // ---------- Dice API client implementing IRandomService ----------
 export class DiceApiRandomService implements IRandomService {
-  // use the Vite dev proxy
+  // Use Vite proxy to avoid CORS in dev
   private endpoint = '/qrand/api/random/dice?n=2';
 
   async rollDice(): Promise<{
@@ -46,9 +44,9 @@ export class DiceApiRandomService implements IRandomService {
     source: 'api' | 'local';
   }> {
     try {
-      const res = await fetch(this.endpoint);
+      const res = await fetch(this.endpoint, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Dice API HTTP ${res.status}`);
-      const data = await res.json();
+      const data = (await res.json()) as { dice?: number[] };
       if (!Array.isArray(data.dice) || data.dice.length < 2) {
         throw new Error('Malformed payload (missing dice array).');
       }
@@ -60,7 +58,6 @@ export class DiceApiRandomService implements IRandomService {
       }
       return { dice1, dice2, total: dice1 + dice2, source: 'api' };
     } catch {
-      // Offline / fallback RNG to keep the app playable
       const dice1 = 1 + Math.floor(Math.random() * 6);
       const dice2 = 1 + Math.floor(Math.random() * 6);
       return { dice1, dice2, total: dice1 + dice2, source: 'local' };
@@ -311,7 +308,6 @@ export class CatanEngine {
   }
 
   private distributeFor(numberToken: number) {
-    // find tiles with this number (and not under robber)
     const tiles = this.tiles.filter(
       (t) => t.numberToken === numberToken && t.id !== this.robberOn
     );

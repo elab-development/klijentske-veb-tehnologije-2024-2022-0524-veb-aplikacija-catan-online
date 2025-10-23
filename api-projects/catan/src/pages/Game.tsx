@@ -26,7 +26,6 @@ export default function Game() {
   );
 
   const [name, setName] = useState('');
-  const [selectedNode, setSelectedNode] = useState<NodeId | null>(null);
   const [availableSpots, setAvailableSpots] = useState<NodeId[]>([]);
 
   const didInit = useRef(false);
@@ -63,12 +62,6 @@ export default function Game() {
     if (!view) return null;
     return view.players.find((p) => p.id === view.currentPlayerId) ?? null;
   }, [view]);
-
-  const buildPaid = () => {
-    if (!selectedNode || !currentPlayer) return;
-    buildSettlementAt(currentPlayer.id, selectedNode);
-    setSelectedNode(null);
-  };
 
   return (
     <div className='min-h-[calc(100vh-56px)] bg-[#08151F] text-white'>
@@ -235,7 +228,7 @@ export default function Game() {
           </div>
 
           {/* Log */}
-          <div className='rounded-xl bg白/5 p-4 bg-white/5'>
+          <div className='rounded-xl bg-white/5 p-4'>
             <h2 className='trajanpro-bold mb-2 text-xl'>Log</h2>
             <ul className='list-disc pl-5 text-white/80'>
               {messages.map((m, i) => (

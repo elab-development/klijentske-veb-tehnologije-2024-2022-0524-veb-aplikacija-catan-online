@@ -38,7 +38,8 @@ const generateAxialCenters = (radius = 2): Axial[] => {
   return out;
 };
 
-const RESOURCE_POOL = [
+// ---- Base pools (exported for randomized builder) ----
+export const BASE_RESOURCE_POOL = [
   ResourceType.Brick,
   ResourceType.Brick,
   ResourceType.Brick,
@@ -60,11 +61,12 @@ const RESOURCE_POOL = [
   ResourceType.Desert,
 ] as const;
 
-const NUMBER_TOKENS: number[] = [
+export const BASE_NUMBER_TOKENS: number[] = [
   5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9, 4, 5, 6, 3, 11,
 ];
 
-const _nonDesert = RESOURCE_POOL.filter((r) => r !== ResourceType.Desert);
+// ---- Deterministic standard board (kept as a stable fallback) ----
+const _nonDesert = BASE_RESOURCE_POOL.filter((r) => r !== ResourceType.Desert);
 let _ndIdx = 0;
 const nextNonDesert = () => _nonDesert[_ndIdx++ % _nonDesert.length];
 
@@ -81,8 +83,7 @@ function buildStandard19Tiles(): {
     const id = `T${i + 1}`;
     const isCenter = centers[i].q === 0 && centers[i].r === 0;
     const resource = isCenter ? ResourceType.Desert : nextNonDesert();
-    const numberToken = isCenter ? null : NUMBER_TOKENS[nIdx++];
-
+    const numberToken = isCenter ? null : BASE_NUMBER_TOKENS[nIdx++];
     tiles.push({ id, resource, numberToken });
     axialById[id] = centers[i];
   }
@@ -90,7 +91,7 @@ function buildStandard19Tiles(): {
   return { tiles, axialById };
 }
 
-// Dedup corners using pixel coordinates (stable size units -> rounded keys)
+// Dedup corners using pixel coordinates
 function buildNodesFromTiles(
   tiles: Tile[],
   axialById: Record<TileId, Axial>
@@ -127,11 +128,11 @@ function buildNodesFromTiles(
         nodeTiles.set(info.id, new Set());
         nodeNeighbors.set(info.id, new Set());
       }
-
       nodeTiles.get(info.id)!.add(tile.id);
       cornerNodes.push(info.id);
     }
 
+    // connect ring neighbors around this tile (edges)
     for (let i = 0; i < 6; i++) {
       const a = cornerNodes[i];
       const b = cornerNodes[(i + 1) % 6];
@@ -155,7 +156,7 @@ function buildNodesFromTiles(
   }));
 }
 
-// Build once (deterministic)
+// Build once (deterministic fallback)
 const built = buildStandard19Tiles();
 export const standard19Tiles: Tile[] = built.tiles;
 export const axialByTileId: Record<TileId, Axial> = built.axialById;
@@ -163,3 +164,40 @@ export const standard19Nodes: NodeDef[] = buildNodesFromTiles(
   standard19Tiles,
   axialByTileId
 );
+
+// ---------- Randomized board (seeded) ----------
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function seededShuffle<T>(arr: T[], rand: () => number): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/** Build a randomized copy of the standard 19 tiles using a 32-bit seed. */
+export function randomizedStandard19Tiles(seed: number): Tile[] {
+  const rand = mulberry32(seed >>> 0);
+
+  const resources = seededShuffle([...BASE_RESOURCE_POOL], rand);
+  const numbers = seededShuffle([...BASE_NUMBER_TOKENS], rand);
+
+  const out: Tile[] = [];
+  let nIdx = 0;
+  for (let i = 0; i < standard19Tiles.length; i++) {
+    const id = standard19Tiles[i].id; // keep positions
+    const resource = resources[i];
+    const numberToken =
+      resource === ResourceType.Desert ? null : numbers[nIdx++];
+    out.push({ id, resource, numberToken });
+  }
+  return out;
+}

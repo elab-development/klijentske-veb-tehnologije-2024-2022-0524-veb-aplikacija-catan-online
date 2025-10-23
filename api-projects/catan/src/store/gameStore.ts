@@ -11,6 +11,8 @@ import type {
   ResourceBundle,
   NodeId,
 } from '../game/catan-core-types';
+import { randomizedStandard19Tiles } from '../game/board-presets';
+import { fetchDrandSeed32 } from '../game/random-seed';
 
 type RollInfo = { total: number; source: 'api' | 'local' };
 
@@ -20,7 +22,6 @@ type GameState = {
   started: boolean;
   lastRoll: RollInfo | null;
   messages: string[];
-  playerSeq: number;
 
   // lifecycle
   init(): void;
@@ -48,20 +49,37 @@ export const useGameStore = create<GameState>((set, get) => ({
   started: false,
   lastRoll: null,
   messages: [],
-  playerSeq: 1,
 
+  // fire-and-forget init: fetch drand seed and build randomized tiles
   init() {
-    const rng: IRandomService = new DiceApiRandomService();
-    const trader: ITradingService = new FourToOneTradingService();
-    const engine = new CatanEngine(rng, trader);
-    set({
-      engine,
-      view: engine.getPublicState(),
-      started: false,
-      lastRoll: null,
-      messages: ['Game initialized.'],
-      playerSeq: 1,
-    });
+    (async () => {
+      try {
+        const seed = await fetchDrandSeed32();
+        const tiles = randomizedStandard19Tiles(seed);
+        const rng: IRandomService = new DiceApiRandomService();
+        const trader: ITradingService = new FourToOneTradingService();
+        const engine = new CatanEngine(rng, trader, { tiles });
+        set({
+          engine,
+          view: engine.getPublicState(),
+          started: false,
+          lastRoll: null,
+          messages: [`Game initialized with randomized board (seed=${seed}).`],
+        });
+      } catch {
+        // fallback to deterministic board
+        const rng: IRandomService = new DiceApiRandomService();
+        const trader: ITradingService = new FourToOneTradingService();
+        const engine = new CatanEngine(rng, trader);
+        set({
+          engine,
+          view: engine.getPublicState(),
+          started: false,
+          lastRoll: null,
+          messages: ['Game initialized (fallback board).'],
+        });
+      }
+    })();
   },
 
   reset() {
@@ -72,13 +90,11 @@ export const useGameStore = create<GameState>((set, get) => ({
   addPlayer(name: string) {
     const { engine } = get();
     if (!engine) return;
-    const seq = get().playerSeq;
-    const id = `p${seq}`;
-    engine.addPlayer(id, name.trim() || `Player ${seq}`);
-    set({
-      view: engine.getPublicState(),
-      playerSeq: seq + 1,
-    });
+    const id = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `p_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    engine.addPlayer(id, name.trim() || `Player`);
+    set({ view: engine.getPublicState() });
   },
 
   startGame(firstPlayerId) {
@@ -90,7 +106,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       view: engine.getPublicState(),
       messages: [
         ...get().messages,
-        'Setup: each player must place 2 settlements (distance rule applies).',
+        'Setup: each player must place 2 settlements (snake order).',
       ],
     });
   },
