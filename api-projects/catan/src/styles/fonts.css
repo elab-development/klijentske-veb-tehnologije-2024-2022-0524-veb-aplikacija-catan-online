@@ -18,17 +18,17 @@
 }
 
 .trajanpro-regular {
-  font-family: 'TrajanPro-Regular', serif;
+  font-family: 'Trajan Pro';
   font-weight: 400;
 }
 
 .trajanpro-bold {
-  font-family: 'TrajanPro-Bold', serif;
+  font-family: 'Trajan Pro';
   font-weight: 700;
 }
 
 html,
 body {
-  font-family: 'TrajanPro-Regular', serif;
+  font-family: 'Trajan Pro';
   font-weight: 400;
 }
