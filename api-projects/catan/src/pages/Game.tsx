@@ -11,11 +11,14 @@ export default function Game() {
   const lastGains = useGameStore((s) => s.lastGains);
   const lastLosses = useGameStore((s) => s.lastLosses);
   const resVersion = useGameStore((s) => s.resVersion);
+  const hasSaved = useGameStore((s) => s.hasSaved);
 
   const init = useGameStore((s) => s.init);
   const reset = useGameStore((s) => s.reset);
   const addPlayer = useGameStore((s) => s.addPlayer);
   const startGame = useGameStore((s) => s.startGame);
+  const continueSaved = useGameStore((s) => s.continueSaved);
+  const clearSaved = useGameStore((s) => s.clearSaved);
   const roll = useGameStore((s) => s.roll);
   const nextPlayer = useGameStore((s) => s.nextPlayer);
   const moveRobber = useGameStore((s) => s.moveRobber);
@@ -24,6 +27,7 @@ export default function Game() {
   const getAvailableSettlementSpots = useGameStore(
     (s) => s.getAvailableSettlementSpots
   );
+  const checkSaved = useGameStore((s) => s.checkSaved);
   const getPlayerResourcesFn = useRef(
     useGameStore.getState().getPlayerResources
   );
@@ -35,8 +39,9 @@ export default function Game() {
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
+    checkSaved();
     init();
-  }, [init]);
+  }, [init, checkSaved]);
 
   useEffect(() => {
     if (started && view) setAvailableSpots(getAvailableSettlementSpots());
@@ -119,6 +124,25 @@ export default function Game() {
               >
                 Start game
               </button>
+
+              {hasSaved && (
+                <>
+                  <button
+                    onClick={continueSaved}
+                    className='rounded-md bg-[#2e7d32] px-4 py-2 hover:opacity-90'
+                  >
+                    Continue
+                  </button>
+                  <button
+                    onClick={clearSaved}
+                    className='rounded-md border border-white/20 px-4 py-2 hover:bg-white/10'
+                    title='Remove saved game from this browser'
+                  >
+                    Clear Save
+                  </button>
+                </>
+              )}
+
               <button
                 onClick={reset}
                 className='rounded-md border border-white/20 px-4 py-2 hover:bg-white/10'

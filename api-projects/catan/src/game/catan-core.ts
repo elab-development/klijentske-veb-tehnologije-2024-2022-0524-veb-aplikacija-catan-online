@@ -100,6 +100,27 @@ function bundleCount(bundle: ResourceBundle): number {
   return sum;
 }
 
+// ---------- Engine Snapshot ----------
+export type EngineSnapshot = {
+  tiles: Tile[];
+  bank: ResourceBundle;
+  players: Array<{
+    id: string;
+    name: string;
+    resources: ResourceBundle;
+    settlements: NodeId[];
+    victoryPoints: number;
+  }>;
+  order: string[];
+  idx: number;
+  robberOn: TileId;
+  turn: number;
+  phase: TurnPhase;
+  nodeOwnership: Record<NodeId, string | null>;
+  setupRound: number;
+  setupDirection: 1 | -1;
+};
+
 // ---------- Core Catan Engine ----------
 export class CatanEngine {
   private tiles: Tile[];
@@ -482,6 +503,77 @@ export class CatanEngine {
   getPlayerResources(playerId: string): ResourceBundle {
     const p = this.players.get(playerId);
     return p ? { ...p.resources } : {};
+  }
+
+  exportState(): EngineSnapshot {
+    const players = Array.from(this.players.values()).map((p) => ({
+      id: p.id,
+      name: p.name,
+      resources: { ...p.resources },
+      settlements: Array.from(p.settlements),
+      victoryPoints: p.victoryPoints,
+    }));
+
+    const nodeOwnership: Record<NodeId, string | null> = {};
+    for (const [nid, owner] of this.nodeOwnership.entries()) {
+      nodeOwnership[nid] = owner ?? null;
+    }
+
+    return {
+      tiles: [...this.tiles],
+      bank: { ...this.bank },
+      players,
+      order: [...this.currentPlayerOrder],
+      idx: this.currentIdx,
+      robberOn: this.robberOn,
+      turn: this.turn,
+      phase: this.phase,
+      nodeOwnership,
+      setupRound: this.setupRound,
+      setupDirection: this.setupDirection,
+    };
+  }
+
+  static importState(
+    snapshot: EngineSnapshot,
+    rng: IRandomService,
+    trader: ITradingService
+  ): CatanEngine {
+    const eng = new CatanEngine(rng, trader, {
+      tiles: snapshot.tiles,
+      initialBank: snapshot.bank,
+    });
+
+    // rebuild players
+    eng.players.clear();
+    for (const p of snapshot.players) {
+      eng.players.set(p.id, {
+        id: p.id,
+        name: p.name,
+        resources: { ...p.resources },
+        settlements: new Set<NodeId>(p.settlements),
+        victoryPoints: p.victoryPoints,
+      } as PlayerState);
+    }
+
+    // order/index/turn/phase/robber
+    eng.currentPlayerOrder = [...snapshot.order];
+    eng.currentIdx = snapshot.idx;
+    eng.turn = snapshot.turn;
+    eng.phase = snapshot.phase;
+    eng.robberOn = snapshot.robberOn;
+
+    // node ownership
+    eng.nodeOwnership.clear();
+    for (const [nid, owner] of Object.entries(snapshot.nodeOwnership)) {
+      eng.nodeOwnership.set(nid as NodeId, owner);
+    }
+
+    // setup snake
+    eng.setupRound = snapshot.setupRound;
+    eng.setupDirection = snapshot.setupDirection;
+
+    return eng;
   }
 }
 

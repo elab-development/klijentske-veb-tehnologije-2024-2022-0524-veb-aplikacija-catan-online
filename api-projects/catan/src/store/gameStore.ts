@@ -5,6 +5,7 @@ import {
   FourToOneTradingService,
   type IRandomService,
   type ITradingService,
+  type EngineSnapshot,
 } from '../game/catan-core';
 import type {
   PublicGameView,
@@ -18,6 +19,8 @@ import { fetchDrandSeed32 } from '../game/random-seed';
 type RollInfo = { total: number; source: 'api' | 'local' };
 type DeltaMap = Record<string, ResourceBundle>; // playerId -> bundle
 
+const SAVE_KEY = 'catan-save-v1';
+
 type GameState = {
   engine: CatanEngine | null;
   view: PublicGameView | null;
@@ -30,11 +33,18 @@ type GameState = {
   lastLosses: DeltaMap;
   resVersion: number;
 
+  hasSaved: boolean;
+
   // lifecycle
   init(): void;
   reset(): void;
   addPlayer(name: string): void;
   startGame(firstPlayerId?: string): void;
+
+  // save/continue
+  checkSaved(): void;
+  continueSaved(): void;
+  clearSaved(): void;
 
   // placement
   getAvailableSettlementSpots(): NodeId[];
@@ -52,6 +62,16 @@ type GameState = {
 
 const emptyDelta = (): DeltaMap => ({});
 
+function loadFromStorage<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 export const useGameStore = create<GameState>((set, get) => ({
   engine: null,
   view: null,
@@ -62,10 +82,78 @@ export const useGameStore = create<GameState>((set, get) => ({
   lastLosses: emptyDelta(),
   resVersion: 0,
 
+  hasSaved: false,
+
+  // ---- persistence helpers (internal) ----
+  // call this after any mutation to persist
+  // (we keep it declared inline so it can access get/set)
+  // @ts-ignore - keep local to store
+  _saveNow: () => {
+    const { engine, started, lastRoll, messages, lastGains, lastLosses } =
+      get();
+    if (!engine) return;
+    const snapshot: EngineSnapshot = engine.exportState();
+    const payload = {
+      snapshot,
+      started,
+      lastRoll,
+      messages,
+      lastGains,
+      lastLosses,
+    };
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+      set({ hasSaved: true });
+    } catch {
+      // ignore quota errors
+    }
+  },
+
+  checkSaved() {
+    const has = !!loadFromStorage(SAVE_KEY);
+    set({ hasSaved: has });
+  },
+
+  continueSaved() {
+    const data = loadFromStorage<{
+      snapshot: EngineSnapshot;
+      started: boolean;
+      lastRoll: RollInfo | null;
+      messages: string[];
+      lastGains: DeltaMap;
+      lastLosses: DeltaMap;
+    }>(SAVE_KEY);
+    if (!data) return;
+
+    const rng: IRandomService = new DiceApiRandomService();
+    const trader: ITradingService = new FourToOneTradingService();
+    const engine = CatanEngine.importState(data.snapshot, rng, trader);
+
+    set({
+      engine,
+      view: engine.getPublicState(),
+      started: data.started,
+      lastRoll: data.lastRoll,
+      messages: data.messages ?? [],
+      lastGains: data.lastGains ?? emptyDelta(),
+      lastLosses: data.lastLosses ?? emptyDelta(),
+      resVersion: get().resVersion + 1,
+      hasSaved: true,
+    });
+  },
+
+  clearSaved() {
+    try {
+      localStorage.removeItem(SAVE_KEY);
+    } catch {}
+    set({ hasSaved: false });
+  },
+
   // fire-and-forget init: fetch drand seed and build randomized tiles
   init() {
     (async () => {
       try {
+        const has = !!loadFromStorage(SAVE_KEY);
         const seed = await fetchDrandSeed32();
         const tiles = randomizedStandard19Tiles(seed);
         const rng: IRandomService = new DiceApiRandomService();
@@ -80,8 +168,10 @@ export const useGameStore = create<GameState>((set, get) => ({
           lastGains: emptyDelta(),
           lastLosses: emptyDelta(),
           resVersion: 0,
+          hasSaved: has,
         });
       } catch {
+        const has = !!loadFromStorage(SAVE_KEY);
         const rng: IRandomService = new DiceApiRandomService();
         const trader: ITradingService = new FourToOneTradingService();
         const engine = new CatanEngine(rng, trader);
@@ -94,6 +184,7 @@ export const useGameStore = create<GameState>((set, get) => ({
           lastGains: emptyDelta(),
           lastLosses: emptyDelta(),
           resVersion: 0,
+          hasSaved: has,
         });
       }
     })();
@@ -102,6 +193,10 @@ export const useGameStore = create<GameState>((set, get) => ({
   reset() {
     get().init();
     set((s) => ({ messages: [...s.messages, 'Game reset.'] }));
+    try {
+      localStorage.removeItem(SAVE_KEY);
+    } catch {}
+    set({ hasSaved: false });
   },
 
   addPlayer(name: string) {
@@ -112,6 +207,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       : `p_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     engine.addPlayer(id, name.trim() || `Player`);
     set({ view: engine.getPublicState() });
+    (get() as any)._saveNow();
   },
 
   startGame(firstPlayerId) {
@@ -129,6 +225,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       lastLosses: emptyDelta(),
       resVersion: get().resVersion + 1,
     });
+    (get() as any)._saveNow();
   },
 
   // ----- Placement -----
@@ -153,6 +250,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         // no deltas during setup
         resVersion: get().resVersion + 1,
       });
+      (get() as any)._saveNow();
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot place there.'],
@@ -188,6 +286,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         lastLosses: discards, // when 7, show immediate losses
         resVersion: get().resVersion + 1, // force PlayerCard to recompute resources now
       });
+      (get() as any)._saveNow();
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot roll now.'],
@@ -206,6 +305,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         // keep lastGains/lastLosses visible until next roll; do NOT clear
         resVersion: get().resVersion + 1,
       });
+      (get() as any)._saveNow();
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot end turn now.'],
@@ -255,6 +355,7 @@ export const useGameStore = create<GameState>((set, get) => ({
           resVersion: get().resVersion + 1,
         });
       }
+      (get() as any)._saveNow();
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot move robber now.'],
@@ -277,6 +378,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         ],
         resVersion: get().resVersion + 1,
       });
+      (get() as any)._saveNow();
     } catch (e: any) {
       set((s) => ({
         messages: [...s.messages, e?.message || 'Cannot build now.'],
