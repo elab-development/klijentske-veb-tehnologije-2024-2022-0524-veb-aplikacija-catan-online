@@ -77,7 +77,7 @@ export default function Game() {
       <div className='mx-auto max-w-6xl px-4 py-4'>
         <h1 className='trajanpro-bold text-2xl'>CATAN — Local Tabletop</h1>
         <p className='text-white/70'>
-          Build, roll, and trade — all on one device. (No save data.)
+          Build, roll, and trade — all on one device.
         </p>
       </div>
 

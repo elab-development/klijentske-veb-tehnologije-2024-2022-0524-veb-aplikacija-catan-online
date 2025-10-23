@@ -31,6 +31,26 @@ export default function Navbar() {
             >
               Game
             </NavLink>
+            <NavLink
+              to='/rules'
+              className={({ isActive }) =>
+                `block px-4 py-2 text-lg tracking-wide trajanpro-regular transition-colors ${
+                  isActive ? 'text-white' : 'text-[#FCDE07]'
+                }`
+              }
+            >
+              Rules
+            </NavLink>
+            <NavLink
+              to='/shop'
+              className={({ isActive }) =>
+                `block px-4 py-2 text-lg tracking-wide trajanpro-regular transition-colors ${
+                  isActive ? 'text-white' : 'text-[#FCDE07]'
+                }`
+              }
+            >
+              Shop
+            </NavLink>
           </div>
 
           <button
@@ -65,6 +85,28 @@ export default function Navbar() {
               onClick={() => setOpen(false)}
             >
               Game
+            </NavLink>
+            <NavLink
+              to='/rules'
+              className={({ isActive }) =>
+                `block px-4 py-2 text-lg tracking-wide trajanpro-regular transition-colors ${
+                  isActive ? 'text-white' : 'text-[#FCDE07]'
+                }`
+              }
+              onClick={() => setOpen(false)}
+            >
+              Rules
+            </NavLink>
+            <NavLink
+              to='/shop'
+              className={({ isActive }) =>
+                `block px-4 py-2 text-lg tracking-wide trajanpro-regular transition-colors ${
+                  isActive ? 'text-white' : 'text-[#FCDE07]'
+                }`
+              }
+              onClick={() => setOpen(false)}
+            >
+              Shop
             </NavLink>
           </div>
         </div>
